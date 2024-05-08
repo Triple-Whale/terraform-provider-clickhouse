@@ -106,24 +106,9 @@ func ResourceTable() *schema.Resource {
 							ForceNew:    true,
 						},
 						"type": {
-							Description:      "Column Type",
-							Type:             schema.TypeString,
-							Required:         true,
-							ValidateDiagFunc: ValidateType,
-							ForceNew:         true,
-						},
-						"array": {
-							Description: "Column Array",
-							Type:        schema.TypeBool,
-							Optional:    true,
-							Default:     false,
-							ForceNew:    true,
-						},
-						"nullable": {
-							Description: "Column Nullable",
-							Type:        schema.TypeBool,
-							Optional:    true,
-							Default:     false,
+							Description: "Column Type",
+							Type:        schema.TypeString,
+							Required:    true,
 							ForceNew:    true,
 						},
 						"comment": {
@@ -261,11 +246,9 @@ func getColumns(columns []ColumnDefinition) []map[string]interface{} {
 
 	for _, column := range columns {
 		ret = append(ret, map[string]interface{}{
-			"name":     column.Name,
-			"type":     column.Type,
-			"array":    column.Array,
-			"nullable": column.Nullable,
-			"comment":  column.Comment,
+			"name":    column.Name,
+			"type":    column.Type,
+			"comment": column.Comment,
 		})
 	}
 	return ret
@@ -274,11 +257,9 @@ func getColumns(columns []ColumnDefinition) []map[string]interface{} {
 func (t *TableResource) setColumns(columns []interface{}) {
 	for _, column := range columns {
 		columnDefinition := ColumnDefinition{
-			Name:     column.(map[string]interface{})["name"].(string),
-			Type:     column.(map[string]interface{})["type"].(string),
-			Array:    column.(map[string]interface{})["array"].(bool),
-			Nullable: column.(map[string]interface{})["nullable"].(bool),
-			Comment:  column.(map[string]interface{})["comment"].(string),
+			Name:    column.(map[string]interface{})["name"].(string),
+			Type:    column.(map[string]interface{})["type"].(string),
+			Comment: column.(map[string]interface{})["comment"].(string),
 		}
 		t.Columns = append(t.Columns, columnDefinition)
 	}

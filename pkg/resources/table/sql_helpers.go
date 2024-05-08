@@ -10,7 +10,7 @@ import (
 func buildColumnsSentence(cols []ColumnDefinition) []string {
 	outColumn := make([]string, 0)
 	for _, col := range cols {
-		outColumn = append(outColumn, fmt.Sprintf("\t `%s` %s %s", col.Name, getTypeWithArray(getTypeWithNullable(col.Type, col.Nullable), col.Array), getComment(col.Comment)))
+		outColumn = append(outColumn, fmt.Sprintf("\t `%s` %s %s", col.Name, col.Type, getComment(col.Comment)))
 	}
 	return outColumn
 }
@@ -32,20 +32,6 @@ func getComment(comment string) string {
 		return fmt.Sprintf("COMMENT '%s'", comment)
 	}
 	return ""
-}
-
-func getTypeWithNullable(t string, nullable bool) string {
-	if nullable {
-		return fmt.Sprintf("Nullable(%s)", t)
-	}
-	return t
-}
-
-func getTypeWithArray(t string, isArray bool) string {
-	if isArray {
-		return fmt.Sprintf("Array(%s)", t)
-	}
-	return t
 }
 
 func buildPartitionBySentence(partitionBy []PartitionByResource) string {

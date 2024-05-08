@@ -61,11 +61,9 @@ type IndexDefinition struct {
 }
 
 type ColumnDefinition struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Array    bool   `json:"array"`
-	Nullable bool   `json:"nullable"`
-	Comment  string `json:"comment"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Comment string `json:"comment"`
 }
 
 type PartitionByResource struct {
@@ -93,37 +91,13 @@ func (t *CHTable) ColumnsToResource() []ColumnDefinition {
 	var columnResources []ColumnDefinition
 	for _, column := range t.Columns {
 		columnResource := ColumnDefinition{
-			Name:     column.Name,
-			Type:     removeNullable(removeArray(column.Type)),
-			Array:    isArray(column.Type),
-			Nullable: isNullable(removeArray(column.Type)),
-			Comment:  column.Comment,
+			Name:    column.Name,
+			Type:    column.Type,
+			Comment: column.Comment,
 		}
 		columnResources = append(columnResources, columnResource)
 	}
 	return columnResources
-}
-
-func removeNullable(columnType string) string {
-	if strings.HasPrefix(columnType, "Nullable(") {
-		return strings.TrimSuffix(strings.TrimPrefix(columnType, "Nullable("), ")")
-	}
-	return columnType
-}
-
-func isNullable(columnType string) bool {
-	return strings.HasPrefix(columnType, "Nullable")
-}
-
-func isArray(columnType string) bool {
-	return strings.HasPrefix(columnType, "Array")
-}
-
-func removeArray(columnType string) string {
-	if strings.HasPrefix(columnType, "Array(") {
-		return strings.TrimSuffix(strings.TrimPrefix(columnType, "Array("), ")")
-	}
-	return columnType
 }
 
 func (t *CHTable) ToResource() (*TableResource, error) {
@@ -201,11 +175,9 @@ func (t *TableResource) GetColumnsResourceList() []ColumnDefinition {
 	var columnResources []ColumnDefinition
 	for _, column := range t.Columns {
 		columnResources = append(columnResources, ColumnDefinition{
-			Name:     column.Name,
-			Type:     column.Type,
-			Nullable: column.Nullable,
-			Array:    column.Array,
-			Comment:  column.Comment,
+			Name:    column.Name,
+			Type:    column.Type,
+			Comment: column.Comment,
 		})
 	}
 	return columnResources

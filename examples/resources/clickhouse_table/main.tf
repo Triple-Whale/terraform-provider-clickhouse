@@ -11,7 +11,7 @@ provider "clickhouse" {
   port = 9000
   host           = "10.46.0.247"
   username       = "sonic"
-  password       = ""
+  password       = "A0VTelUpUmhN8nU4"
 }
 
 /*
@@ -45,10 +45,10 @@ resource "clickhouse_table" "replicated_table" {
   
 }
 */
-
+/*
 resource "clickhouse_table" "t2" {
   database      = "default"
-  name          = "replicated_test"
+  name          = "Replicated_test"
   engine        = "ReplicatedReplacingMergeTree"
   engine_params = []
   comment = "hi!"
@@ -86,15 +86,16 @@ resource "clickhouse_table" "t2" {
     granularity = 10000
   }
 }
-
+*/
 /*
 resource "clickhouse_view" "test_view" {
   database      = "default"
   name          = "test_view"
   cluster="main"
-query = "select * from default.nx_refunds limit 10"
+query = "select * from default.shop_settings limit 10"
 }
-
+*/
+/*
 resource "clickhouse_view" "test_materialized_view" {
   database      = "default"
   name          = "test_materialized_view"
