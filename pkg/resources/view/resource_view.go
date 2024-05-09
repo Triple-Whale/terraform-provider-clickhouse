@@ -77,7 +77,7 @@ func resourceViewRead(ctx context.Context, d *schema.ResourceData, meta any) dia
 	chView, err := chViewService.GetView(ctx, database, viewName)
 	if chView == nil && err == nil {
 		d.SetId("")
-		return diags
+		return nil
 	}
 
 	if err != nil {
