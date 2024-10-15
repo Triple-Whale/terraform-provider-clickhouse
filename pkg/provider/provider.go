@@ -139,6 +139,8 @@ func configure() func(context.Context, *schema.ResourceData) (any, diag.Diagnost
 				Username: username,
 				Password: password,
 			},
+			MaxIdleConns: 10,
+			MaxOpenConns: 50,
 			Settings: clickhouse.Settings{
 				"max_execution_time": 300,
 			},
