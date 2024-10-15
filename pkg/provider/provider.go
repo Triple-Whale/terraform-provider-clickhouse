@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
@@ -153,10 +154,16 @@ func configure() func(context.Context, *schema.ResourceData) (any, diag.Diagnost
 			return nil, diag.FromErr(fmt.Errorf("error connecting to clickhouse: %v", err))
 		}
 
-		if err := conn.Ping(ctx); err != nil {
-			return nil, diag.FromErr(fmt.Errorf("ping clickhouse database: %w", err))
+		retries := 10
+		backoff := time.Second
+		for i := 0; i < retries; i++ {
+			if err := conn.Ping(ctx); err == nil {
+				return &common.ApiClient{ClickhouseConnection: &conn, DefaultCluster: defaultCluster}, diags
+			}
+			fmt.Printf("Attempt %d: failed to ping database: %v\n", i+1, err)
+			time.Sleep(backoff)
 		}
 
-		return &common.ApiClient{ClickhouseConnection: &conn, DefaultCluster: defaultCluster}, diags
+		return nil, diag.FromErr(fmt.Errorf("ping clickhouse database failed after %d attempts: %w", retries, err))
 	}
 }
