@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -52,6 +54,10 @@ func ResourceView() *schema.Resource {
 				StateFunc: func(val interface{}) string {
 					return common.FormatSQL(val.(string))
 				},
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					return standardizeString(old) == standardizeString(new)
+				},
+				DiffSuppressOnRefresh: true,
 			},
 			"materialized": {
 				Description: "Is materialized view",
@@ -68,6 +74,14 @@ func ResourceView() *schema.Resource {
 			},
 		},
 	}
+}
+
+func standardizeString(input string) string {
+	trimmed := strings.TrimSpace(input)
+	lowered := strings.ToLower(trimmed)
+	re := regexp.MustCompile(`\s+`)
+	standardized := re.ReplaceAllString(lowered, " ")
+	return standardized
 }
 
 func resourceViewRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
