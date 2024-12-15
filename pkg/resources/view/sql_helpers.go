@@ -10,7 +10,7 @@ func buildCreateOnClusterSentence(resource ViewResource) (query string) {
 	clusterStatement := common.GetClusterStatement(resource.Cluster)
 
 	ret := fmt.Sprintf(
-		"CREATE %s VIEW %v.%v %v %s as (%s) COMMENT '%s'",
+		"CREATE OR REPLACE %s VIEW %v.%v %v %s as (%s) COMMENT '%s'",
 		isMaterializedStatement(resource.Materialized),
 		resource.Database,
 		resource.Name,
