@@ -75,7 +75,6 @@ func (ts *CHTableService) UpdateTable(ctx context.Context, table TableResource, 
 			oldColumnsMap[columnName] = columnMap
 		}
 
-		// lookup map
 		newColumnsMap := make(map[string]map[string]interface{})
 		for _, column := range newColumns {
 			columnMap := column.(map[string]interface{})
