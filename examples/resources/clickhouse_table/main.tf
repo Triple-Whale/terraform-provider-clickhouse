@@ -9,7 +9,7 @@ terraform {
 
 provider "clickhouse" {
   port = 9000
-  host           = "10.46.0.247"
+  host           = "stg.sonic-sharded-0-2.clickhouse.internal.whaledb.io"
   username       = "sonic"
   password       = ""
 }
@@ -45,74 +45,83 @@ resource "clickhouse_table" "replicated_table" {
   
 }
 */
-
+/*
 resource "clickhouse_table" "t2" {
   database      = "default"
   name          = "Replicated_test"
   engine        = "ReplacingMergeTree"
   engine_params = []
-  comment = "hi!"
-  cluster = "main"
+
   column {
     name = "event_date"
     type = "Date"
+    
   }
-  column {
-    name = "event_type"
-    type = "Int32"
+
+    column {
+    name = "nnn"
+    type = "DateTime"
     default_kind = "DEFAULT"
-    default_expression = 5
-  }
-  column {
-    name = "event_type_2"
-    type = "Int32"
-  }
-  column {
-    name = "article.id"
-    type = "Int32"
-  }
-  column {
-    name = "article.title"
-    type = "String"
-        default_kind = "DEFAULT"
-    default_expression = "'yo'"
+    default_expression = 7
 
   }
-  order_by = ["event_date", "event_type"]
+
+
+  order_by = ["event_date"]
   partition_by {
     by = "event_date"
-    partition_function = "sipHash64"
-    mod = "1000"
-  }
-  partition_by {
-    by = "event_type"
-    partition_function = "sipHash64"
-
-  }
-  index {
-    name = "test_index"
-    expression = "[event_type, event_type_2]"
-    type = "minmax"
-    granularity = 10000
   }
 }
-
+*/
+/*
+resource "clickhouse_table" "test" {
+  database      = "default"
+  name          = "test"
+  engine        = "ReplacingMergeTree"
+  column {
+    name = "event_date"
+    
+    type = "Date"
+  }
+  order_by = ["event_date"]
+}
+*/
 /*
 resource "clickhouse_view" "test_view" {
   database      = "default"
+  cluster = "main"
   name          = "test_view"
-  cluster="main"
-query = "select * FROM default.shop_settings LIMIT 10"
+  materialized = false
+  comment = "jesse's"
+query = "       select     2     "
 }
-*/
-/*
-resource "clickhouse_view" "test_materialized_view" {
-  database      = "default"
-  name          = "test_materialized_view"
-  materialized = true
-  to_table = "test_view"
-  cluster="main"
-query = "select * from default.nx_refunds LIMIT 10"
+
+resource "clickhouse_view" "test_view1" {
+  database      = "public"
+  name          = "test_view"
+  materialized = false
+  comment = "jesse's"
+query = "select * FROM default.shop_settings limit 10"
 }
 
 */
+
+resource "clickhouse_table" "example" {
+  database = "default"
+  name     = "example_table"
+  engine   = "MergeTree"
+
+  column {
+    name = "id"
+    type = "UInt32"
+  }
+
+
+
+  column {
+    name = "created_at"
+    type = "DateTime"
+  }
+
+  order_by = ["id"]
+}
