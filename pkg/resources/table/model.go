@@ -120,7 +120,7 @@ func (t *CHTable) ToResource() (*TableResource, error) {
 	engineParams := GetEngineParams(t.EngineFull)
 	orderBy := GetOrderBy(t.EngineFull)
 
-	comment, cluster, _, err := common.UnmarshalComment(t.Comment)
+	comment, cluster, _, _, err := common.UnmarshalComment(t.Comment)
 	if err != nil {
 		return nil, err
 	}

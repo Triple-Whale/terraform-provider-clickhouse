@@ -17,15 +17,22 @@ func toTablePhrase(toTable *string) string {
 	return ""
 }
 
-func GetComment(comment string, cluster string, toTable *string) string {
-	storingComment := fmt.Sprintf(`{"comment":"%v","cluster":"%v"%s}`, comment, cluster, toTablePhrase(toTable))
+func refreshPhrase(refresh *string) string {
+	if refresh != nil && *refresh != "" {
+		return fmt.Sprintf(`,"refresh":"%v"`, *refresh)
+	}
+	return ""
+}
+
+func GetComment(comment string, cluster string, toTable *string, refresh *string) string {
+	storingComment := fmt.Sprintf(`{"comment":"%v","cluster":"%v"%s%s}`, comment, cluster, toTablePhrase(toTable), refreshPhrase(refresh))
 	storingComment = strings.Replace(storingComment, "'", "\\'", -1)
 	return storingComment
 }
 
-func UnmarshalComment(storedComment string) (comment string, cluster string, toTable string, err error) {
+func UnmarshalComment(storedComment string) (comment string, cluster string, toTable string, refresh string, err error) {
 	if storedComment == "" {
-		return "", "", "", nil
+		return "", "", "", "", nil
 	}
 	storedComment = strings.Replace(storedComment, "\\'", "'", -1)
 
@@ -34,15 +41,18 @@ func UnmarshalComment(storedComment string) (comment string, cluster string, toT
 	var dat map[string]interface{}
 
 	if err := json.Unmarshal(byteStreamComment, &dat); err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	comment = dat["comment"].(string)
 	cluster = dat["cluster"].(string)
 	if dat["to_table"] != nil {
 		toTable = dat["to_table"].(string)
 	}
+	if dat["refresh"] != nil {
+		refresh = dat["refresh"].(string)
+	}
 
-	return comment, cluster, toTable, err
+	return comment, cluster, toTable, refresh, err
 }
 
 func GetClusterStatement(cluster string) (clusterStatement string) {

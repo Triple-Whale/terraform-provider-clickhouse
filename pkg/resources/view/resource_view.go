@@ -72,6 +72,63 @@ func ResourceView() *schema.Resource {
 				ForceNew:    true,
 				Computed:    true,
 			},
+			"refresh": {
+				Description: "REFRESH clause for materialized view (e.g. 'EVERY 1 HOUR')",
+				Type:        schema.TypeString,
+				Optional:    true,
+				ForceNew:    true,
+			},
+			"engine": {
+				Description: "Inline engine for self-contained REFRESH MV (e.g. 'MergeTree')",
+				Type:        schema.TypeString,
+				Optional:    true,
+				ForceNew:    true,
+			},
+			"order_by": {
+				Description: "Order by columns for inline engine",
+				Type:        schema.TypeList,
+				Optional:    true,
+				ForceNew:    true,
+				Elem: &schema.Schema{
+					Type:     schema.TypeString,
+					ForceNew: true,
+				},
+			},
+			"column": {
+				Description: "Column definitions for inline engine",
+				Type:        schema.TypeList,
+				Optional:    true,
+				ForceNew:    true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"name": {
+							Description: "Column Name",
+							Type:        schema.TypeString,
+							Required:    true,
+						},
+						"type": {
+							Description: "Column Type",
+							Type:        schema.TypeString,
+							Required:    true,
+						},
+						"comment": {
+							Description: "Column Comment",
+							Type:        schema.TypeString,
+							Optional:    true,
+						},
+						"default_kind": {
+							Description: "Column Default Kind",
+							Type:        schema.TypeString,
+							Optional:    true,
+						},
+						"default_expression": {
+							Description: "Column Default Expression",
+							Type:        schema.TypeString,
+							Optional:    true,
+						},
+					},
+				},
+			},
 		},
 	}
 }
@@ -136,6 +193,32 @@ func resourceViewRead(ctx context.Context, d *schema.ResourceData, meta any) dia
 			return diag.FromErr(fmt.Errorf("setting to_table: %v", err))
 		}
 	}
+	if viewResource.Refresh != "" {
+		if err := d.Set("refresh", viewResource.Refresh); err != nil {
+			return diag.FromErr(fmt.Errorf("setting refresh: %v", err))
+		}
+	}
+	// Only fetch and set inline engine fields when the state already has engine set.
+	// This avoids diffs on existing MVs created with TO table.
+	if existingEngine := d.Get("engine").(string); existingEngine != "" {
+		if err := d.Set("engine", existingEngine); err != nil {
+			return diag.FromErr(fmt.Errorf("setting engine: %v", err))
+		}
+		columns, colErr := chViewService.getViewColumns(ctx, database, viewName)
+		if colErr != nil {
+			return diag.FromErr(fmt.Errorf("getting columns for view: %v", colErr))
+		}
+		if columns != nil {
+			if err := d.Set("column", getColumnsForSchema(columnsToResource(columns))); err != nil {
+				return diag.FromErr(fmt.Errorf("setting column: %v", err))
+			}
+		}
+		if orderBy := d.Get("order_by"); orderBy != nil {
+			if err := d.Set("order_by", orderBy); err != nil {
+				return diag.FromErr(fmt.Errorf("setting order_by: %v", err))
+			}
+		}
+	}
 
 	d.SetId(viewResource.Cluster + ":" + database + ":" + viewName)
 
@@ -154,7 +237,11 @@ func resourceViewCreate(ctx context.Context, d *schema.ResourceData, meta any) d
 	viewResource.Query = d.Get("query").(string)
 	viewResource.Materialized = d.Get("materialized").(bool)
 	viewResource.ToTable = d.Get("to_table").(string)
-	viewResource.Comment = common.GetComment(d.Get("comment").(string), viewResource.Cluster, &viewResource.ToTable)
+	viewResource.Refresh = d.Get("refresh").(string)
+	viewResource.InlineEngine = d.Get("engine").(string)
+	viewResource.OrderBy = common.MapArrayInterfaceToArrayOfStrings(d.Get("order_by").([]interface{}))
+	viewResource.setColumns(d.Get("column").([]interface{}))
+	viewResource.Comment = common.GetComment(d.Get("comment").(string), viewResource.Cluster, &viewResource.ToTable, &viewResource.Refresh)
 
 	if viewResource.Cluster == "" {
 		viewResource.Cluster = client.DefaultCluster

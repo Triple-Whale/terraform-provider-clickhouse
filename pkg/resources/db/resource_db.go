@@ -94,7 +94,7 @@ func resourceDbRead(ctx context.Context, d *schema.ResourceData, meta any) diag.
 		return diags
 	}
 
-	comment, cluster, _, err := common.UnmarshalComment(storedComment)
+	comment, cluster, _, _, err := common.UnmarshalComment(storedComment)
 	if err != nil {
 		diags = append(diags, diag.Diagnostic{
 			Severity: diag.Warning,
@@ -174,7 +174,7 @@ func resourceDbCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 	databaseName := d.Get("name").(string)
 	comment := d.Get("comment").(string)
 
-	query := fmt.Sprintf("CREATE DATABASE %v %v COMMENT '%v'", databaseName, clusterStatement, common.GetComment(comment, cluster, nil))
+	query := fmt.Sprintf("CREATE DATABASE %v %v COMMENT '%v'", databaseName, clusterStatement, common.GetComment(comment, cluster, nil, nil))
 
 	err := conn.Exec(ctx, query)
 	if err != nil {
