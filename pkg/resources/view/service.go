@@ -51,14 +51,34 @@ func (ts *CHViewService) GetView(ctx context.Context, database string, view stri
 		return nil, fmt.Errorf("scanning Clickhouse view row: %v", err)
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("getting columns for Clickhouse view: %v", err)
-	}
 	// the value read from system.tables is not formatted
 	formattedQuery := common.FormatSQL(chView.Query)
 	chView.Query = formattedQuery
 
 	return &chView, nil
+}
+
+func (ts *CHViewService) getViewColumns(ctx context.Context, database string, table string) ([]CHColumn, error) {
+	query := fmt.Sprintf(
+		"SELECT database, table, name, type, comment, default_kind, default_expression FROM system.columns WHERE database = '%s' AND table = '%s'",
+		database,
+		table,
+	)
+	rows, err := (*ts.CHConnection).Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("reading columns from Clickhouse: %v", err)
+	}
+
+	var chColumns []CHColumn
+	for rows.Next() {
+		var column CHColumn
+		err := rows.ScanStruct(&column)
+		if err != nil {
+			return nil, fmt.Errorf("scanning Clickhouse column row: %v", err)
+		}
+		chColumns = append(chColumns, column)
+	}
+	return chColumns, nil
 }
 
 func (ts *CHViewService) CreateView(ctx context.Context, viewResource ViewResource) error {
