@@ -3,6 +3,7 @@ package resourcetable
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -203,6 +204,26 @@ func resourceTableRead(ctx context.Context, d *schema.ResourceData, meta any) di
 		return diag.FromErr(fmt.Errorf("reading Clickhouse table: %v", err))
 	}
 
+	// replica comparison happens raw-vs-raw, before any representation normalization
+	inSync := true
+	if client.VerifyReplicas && len(client.ReplicaConnections) > 0 {
+		inSync, err = chTableService.CheckReplicasInSync(ctx, chTable, client.ReplicaConnections)
+		if err != nil {
+			return diag.FromErr(fmt.Errorf("verifying replicas: %v", err))
+		}
+	}
+
+	// fold flattened Nested members back into the declared representation: the declaration is
+	// the only ground truth (ClickHouse stores both spellings identically)
+	declaredNested := map[string]bool{}
+	for _, column := range d.Get("column").([]interface{}) {
+		columnMap := column.(map[string]interface{})
+		if strings.HasPrefix(columnMap["type"].(string), "Nested(") {
+			declaredNested[columnMap["name"].(string)] = true
+		}
+	}
+	chTable.Columns = normalizeNestedColumns(chTable.Columns, declaredNested)
+
 	tableResource, err := chTable.ToResource()
 	if err != nil {
 		return diag.FromErr(fmt.Errorf("transforming Clickhouse table to resource: %v", err))
@@ -248,14 +269,6 @@ func resourceTableRead(ctx context.Context, d *schema.ResourceData, meta any) di
 	}
 	// not set - settings
 
-	inSync := true
-	if client.VerifyReplicas && len(client.ReplicaConnections) > 0 {
-		var err error
-		inSync, err = chTableService.CheckReplicasInSync(ctx, chTable, client.ReplicaConnections)
-		if err != nil {
-			return diag.FromErr(fmt.Errorf("verifying replicas: %v", err))
-		}
-	}
 	if err := d.Set("replicas_in_sync", inSync); err != nil {
 		return diag.FromErr(fmt.Errorf("setting replicas_in_sync: %v", err))
 	}

@@ -233,22 +233,20 @@ func (ts *CHTableService) getTableColumns(ctx context.Context, database string, 
 		}
 		chColumns = append(chColumns, column)
 	}
-	return normalizeNestedColumns(chColumns), nil
+	return chColumns, nil
 }
 
 // ClickHouse stores a Nested column flattened (obj.sub Array(T) per member, flatten_nested=1),
-// so a read returns a different shape than the declared Nested(...) and every refresh reports a
-// false column diff. Fold flattened members back into the declared form.
-func normalizeNestedColumns(columns []CHColumn) []CHColumn {
+// and SHOW CREATE flattens too - the database holds no distinction between a declared
+// Nested(...) and independently declared dotted Array columns. The declaration is the only
+// ground truth, so a dotted group folds back into Nested ONLY when the declared state names
+// that prefix as Nested.
+func normalizeNestedColumns(columns []CHColumn, declaredNested map[string]bool) []CHColumn {
 	byPrefix := map[string][]CHColumn{}
-	var order []string
 	for _, column := range columns {
 		dot := strings.Index(column.Name, ".")
-		if dot > 0 && strings.HasPrefix(column.Type, "Array(") {
+		if dot > 0 && strings.HasPrefix(column.Type, "Array(") && declaredNested[column.Name[:dot]] {
 			prefix := column.Name[:dot]
-			if _, seen := byPrefix[prefix]; !seen {
-				order = append(order, prefix)
-			}
 			byPrefix[prefix] = append(byPrefix[prefix], column)
 		}
 	}
@@ -323,11 +321,57 @@ func sameColumns(a, b []CHColumn) bool {
 	return true
 }
 
+// declared Nested(...) columns compare and converge in flattened space - dotted Array members -
+// because that is the only shape ClickHouse actually stores (flatten_nested=1)
+func flattenDeclaredColumns(columns []ColumnDefinition) []ColumnDefinition {
+	var result []ColumnDefinition
+	for _, column := range columns {
+		if strings.HasPrefix(column.Type, "Nested(") {
+			inner := strings.TrimSuffix(strings.TrimPrefix(column.Type, "Nested("), ")")
+			for _, member := range splitTopLevel(inner) {
+				member = strings.TrimSpace(member)
+				space := strings.Index(member, " ")
+				if space <= 0 {
+					continue
+				}
+				result = append(result, ColumnDefinition{
+					Name: column.Name + "." + strings.Trim(member[:space], "`"),
+					Type: fmt.Sprintf("Array(%s)", strings.TrimSpace(member[space+1:])),
+				})
+			}
+			continue
+		}
+		result = append(result, column)
+	}
+	return result
+}
+
+// split on commas not inside parentheses: "a String, b Tuple(x Int8, y Int8)" -> 2 parts
+func splitTopLevel(s string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
 // converge every replica to the declared schema with idempotent ON CLUSTER DDL: each statement
 // no-ops where a replica already conforms and acts where it does not
 func (ts *CHTableService) ConvergeReplicas(ctx context.Context, table TableResource, replicas []*driver.Conn) error {
 	declared := map[string]ColumnDefinition{}
-	for _, column := range table.Columns {
+	for _, column := range flattenDeclaredColumns(table.Columns) {
 		declared[column.Name] = column
 	}
 	toAdd := map[string]bool{}
@@ -363,7 +407,7 @@ func (ts *CHTableService) ConvergeReplicas(ctx context.Context, table TableResou
 
 	clusterStatement := common.GetClusterStatement(table.Cluster)
 	var queries []string
-	for _, column := range table.Columns {
+	for _, column := range flattenDeclaredColumns(table.Columns) {
 		if toAdd[column.Name] {
 			queries = append(queries, fmt.Sprintf("ALTER TABLE %s.%s %s ADD COLUMN IF NOT EXISTS %s %s %s %s",
 				table.Database, table.Name, clusterStatement, column.Name, column.Type, column.DefaultKind, column.DefaultExpression))
