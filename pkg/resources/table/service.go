@@ -236,6 +236,202 @@ func (ts *CHTableService) getTableColumns(ctx context.Context, database string, 
 	return chColumns, nil
 }
 
+// ClickHouse stores a Nested column flattened (obj.sub Array(T) per member, flatten_nested=1),
+// and SHOW CREATE flattens too - the database holds no distinction between a declared
+// Nested(...) and independently declared dotted Array columns. The declaration is the only
+// ground truth, so a dotted group folds back into Nested ONLY when the declared state names
+// that prefix as Nested.
+func normalizeNestedColumns(columns []CHColumn, declaredNested map[string]bool) []CHColumn {
+	byPrefix := map[string][]CHColumn{}
+	for _, column := range columns {
+		dot := strings.Index(column.Name, ".")
+		if dot > 0 && strings.HasPrefix(column.Type, "Array(") && declaredNested[column.Name[:dot]] {
+			prefix := column.Name[:dot]
+			byPrefix[prefix] = append(byPrefix[prefix], column)
+		}
+	}
+	if len(byPrefix) == 0 {
+		return columns
+	}
+	var result []CHColumn
+	emitted := map[string]bool{}
+	for _, column := range columns {
+		dot := strings.Index(column.Name, ".")
+		if dot > 0 {
+			if members, ok := byPrefix[column.Name[:dot]]; ok {
+				prefix := column.Name[:dot]
+				if !emitted[prefix] {
+					emitted[prefix] = true
+					var parts []string
+					for _, member := range members {
+						inner := strings.TrimSuffix(strings.TrimPrefix(member.Type, "Array("), ")")
+						parts = append(parts, fmt.Sprintf("%s %s", member.Name[dot+1:], inner))
+					}
+					result = append(result, CHColumn{
+						Database: column.Database,
+						Table:    column.Table,
+						Name:     prefix,
+						Type:     fmt.Sprintf("Nested(%s)", strings.Join(parts, ", ")),
+					})
+				}
+				continue
+			}
+		}
+		result = append(result, column)
+	}
+	return result
+}
+
+// replica consistency: every replica must present the same columns and comment as the primary.
+// Unreachable or missing-on-replica states surface as errors, never as "in sync".
+func (ts *CHTableService) CheckReplicasInSync(ctx context.Context, primary *CHTable, replicas []*driver.Conn) (bool, error) {
+	for i, replicaConn := range replicas {
+		replicaService := CHTableService{CHConnection: replicaConn}
+		replicaTable, err := replicaService.GetTable(ctx, primary.Database, primary.Name)
+		if err != nil {
+			return false, fmt.Errorf("reading table from replica %d: %v", i, err)
+		}
+		if replicaTable == nil {
+			return false, nil
+		}
+		if replicaTable.Comment != primary.Comment || !sameColumns(primary.Columns, replicaTable.Columns) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func sameColumns(a, b []CHColumn) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	key := func(c CHColumn) string {
+		return c.Name + "|" + c.Type + "|" + c.DefaultKind + "|" + c.DefaultExpression
+	}
+	seen := map[string]int{}
+	for _, c := range a {
+		seen[key(c)]++
+	}
+	for _, c := range b {
+		if seen[key(c)] == 0 {
+			return false
+		}
+		seen[key(c)]--
+	}
+	return true
+}
+
+// declared Nested(...) columns compare and converge in flattened space - dotted Array members -
+// because that is the only shape ClickHouse actually stores (flatten_nested=1)
+func flattenDeclaredColumns(columns []ColumnDefinition) []ColumnDefinition {
+	var result []ColumnDefinition
+	for _, column := range columns {
+		if strings.HasPrefix(column.Type, "Nested(") {
+			inner := strings.TrimSuffix(strings.TrimPrefix(column.Type, "Nested("), ")")
+			for _, member := range splitTopLevel(inner) {
+				member = strings.TrimSpace(member)
+				space := strings.Index(member, " ")
+				if space <= 0 {
+					continue
+				}
+				result = append(result, ColumnDefinition{
+					Name: column.Name + "." + strings.Trim(member[:space], "`"),
+					Type: fmt.Sprintf("Array(%s)", strings.TrimSpace(member[space+1:])),
+				})
+			}
+			continue
+		}
+		result = append(result, column)
+	}
+	return result
+}
+
+// split on commas not inside parentheses: "a String, b Tuple(x Int8, y Int8)" -> 2 parts
+func splitTopLevel(s string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
+// converge every replica to the declared schema with idempotent ON CLUSTER DDL: each statement
+// no-ops where a replica already conforms and acts where it does not
+func (ts *CHTableService) ConvergeReplicas(ctx context.Context, table TableResource, replicas []*driver.Conn) error {
+	declared := map[string]ColumnDefinition{}
+	for _, column := range flattenDeclaredColumns(table.Columns) {
+		declared[column.Name] = column
+	}
+	toAdd := map[string]bool{}
+	toModify := map[string]bool{}
+	toDrop := map[string]bool{}
+	for i, replicaConn := range replicas {
+		replicaService := CHTableService{CHConnection: replicaConn}
+		replicaTable, err := replicaService.GetTable(ctx, table.Database, table.Name)
+		if err != nil {
+			return fmt.Errorf("reading table from replica %d: %v", i, err)
+		}
+		if replicaTable == nil {
+			return fmt.Errorf("table %s.%s missing on replica %d: converge repairs divergence, not absence", table.Database, table.Name, i)
+		}
+		actual := map[string]CHColumn{}
+		for _, column := range replicaTable.Columns {
+			actual[column.Name] = column
+		}
+		for name, want := range declared {
+			got, exists := actual[name]
+			if !exists {
+				toAdd[name] = true
+			} else if got.Type != want.Type {
+				toModify[name] = true
+			}
+		}
+		for name := range actual {
+			if _, exists := declared[name]; !exists {
+				toDrop[name] = true
+			}
+		}
+	}
+
+	clusterStatement := common.GetClusterStatement(table.Cluster)
+	var queries []string
+	for _, column := range flattenDeclaredColumns(table.Columns) {
+		if toAdd[column.Name] {
+			queries = append(queries, fmt.Sprintf("ALTER TABLE %s.%s %s ADD COLUMN IF NOT EXISTS %s %s %s %s",
+				table.Database, table.Name, clusterStatement, column.Name, column.Type, column.DefaultKind, column.DefaultExpression))
+		}
+		if toModify[column.Name] {
+			queries = append(queries, fmt.Sprintf("ALTER TABLE %s.%s %s MODIFY COLUMN %s %s",
+				table.Database, table.Name, clusterStatement, column.Name, column.Type))
+		}
+	}
+	for name := range toDrop {
+		queries = append(queries, fmt.Sprintf("ALTER TABLE %s.%s %s DROP COLUMN IF EXISTS %s",
+			table.Database, table.Name, clusterStatement, name))
+	}
+	queries = append(queries, fmt.Sprintf("ALTER TABLE %s.%s %s MODIFY COMMENT '%s'",
+		table.Database, table.Name, clusterStatement, table.Comment))
+
+	for _, query := range queries {
+		if err := (*ts.CHConnection).Exec(ctx, strings.Join(strings.Fields(query), " ")); err != nil {
+			return fmt.Errorf("converging replicas (%s): %v", query, err)
+		}
+	}
+	return nil
+}
+
 func (ts *CHTableService) CreateTable(ctx context.Context, tableResource TableResource) error {
 	query := buildCreateOnClusterSentence(tableResource)
 	err := (*ts.CHConnection).Exec(ctx, query)

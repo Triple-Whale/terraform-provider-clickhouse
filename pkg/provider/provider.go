@@ -90,6 +90,18 @@ func New(version string) func() *schema.Provider {
 					Optional:    true,
 					Default:     false,
 				},
+				"replica_hosts": {
+					Description: "All replica hosts of the cluster; used with verify_replicas to detect per-replica drift",
+					Type:        schema.TypeList,
+					Optional:    true,
+					Elem:        &schema.Schema{Type: schema.TypeString},
+				},
+				"verify_replicas": {
+					Description: "Read every replica_hosts entry on refresh and flag tables whose replicas diverge",
+					Type:        schema.TypeBool,
+					Optional:    true,
+					Default:     false,
+				},
 			},
 			DataSourcesMap: map[string]*schema.Resource{
 				"clickhouse_dbs": datasources.DataSourceDbs(),
@@ -126,6 +138,11 @@ func configure() func(context.Context, *schema.ResourceData) (any, diag.Diagnost
 		defaultCluster := d.Get("default_cluster").(string)
 		password := d.Get("password").(string)
 		secure := d.Get("secure").(bool)
+		verifyReplicas := d.Get("verify_replicas").(bool)
+		var replicaHosts []string
+		for _, h := range d.Get("replica_hosts").([]interface{}) {
+			replicaHosts = append(replicaHosts, h.(string))
+		}
 
 		var TLSConfig *tls.Config
 		// To use TLS it's necessary to set the TLSConfig field as not nil
@@ -158,7 +175,28 @@ func configure() func(context.Context, *schema.ResourceData) (any, diag.Diagnost
 		backoff := time.Second
 		for i := 0; i < retries; i++ {
 			if err := conn.Ping(ctx); err == nil {
-				return &common.ApiClient{ClickhouseConnection: &conn, DefaultCluster: defaultCluster}, diags
+				client := &common.ApiClient{ClickhouseConnection: &conn, DefaultCluster: defaultCluster, VerifyReplicas: verifyReplicas}
+				if verifyReplicas {
+					for _, replicaHost := range replicaHosts {
+						replicaConn, replicaErr := clickhouse.Open(&clickhouse.Options{
+							Addr:         []string{fmt.Sprintf("%s:%d", replicaHost, port)},
+							Auth:         clickhouse.Auth{Username: username, Password: password},
+							MaxIdleConns: 2,
+							MaxOpenConns: 5,
+							Settings:     clickhouse.Settings{"max_execution_time": 300},
+							TLS:          TLSConfig,
+						})
+						if replicaErr != nil {
+							return nil, diag.FromErr(fmt.Errorf("connecting to replica %s: %v", replicaHost, replicaErr))
+						}
+						// an unreachable replica must fail loudly: unverifiable is not in-sync
+						if pingErr := replicaConn.Ping(ctx); pingErr != nil {
+							return nil, diag.FromErr(fmt.Errorf("pinging replica %s: %v", replicaHost, pingErr))
+						}
+						client.ReplicaConnections = append(client.ReplicaConnections, &replicaConn)
+					}
+				}
+				return client, diags
 			}
 			fmt.Printf("Attempt %d: failed to ping database: %v\n", i+1, err)
 			time.Sleep(backoff)

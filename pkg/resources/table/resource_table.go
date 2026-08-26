@@ -3,6 +3,7 @@ package resourcetable
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -23,6 +24,12 @@ func ResourceTable() *schema.Resource {
 				Type:        schema.TypeString,
 				Required:    true,
 				ForceNew:    true,
+			},
+			"replicas_in_sync": {
+				Description: "Desired: true. With the provider's verify_replicas flag, read compares every replica and sets false on divergence; the resulting diff triggers a converge update",
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Default:     true,
 			},
 			"comment": {
 				Description: "Database comment, it will be codified in a json along with come metadata information (like cluster name in case of clustering)",
@@ -197,6 +204,26 @@ func resourceTableRead(ctx context.Context, d *schema.ResourceData, meta any) di
 		return diag.FromErr(fmt.Errorf("reading Clickhouse table: %v", err))
 	}
 
+	// replica comparison happens raw-vs-raw, before any representation normalization
+	inSync := true
+	if client.VerifyReplicas && len(client.ReplicaConnections) > 0 {
+		inSync, err = chTableService.CheckReplicasInSync(ctx, chTable, client.ReplicaConnections)
+		if err != nil {
+			return diag.FromErr(fmt.Errorf("verifying replicas: %v", err))
+		}
+	}
+
+	// fold flattened Nested members back into the declared representation: the declaration is
+	// the only ground truth (ClickHouse stores both spellings identically)
+	declaredNested := map[string]bool{}
+	for _, column := range d.Get("column").([]interface{}) {
+		columnMap := column.(map[string]interface{})
+		if strings.HasPrefix(columnMap["type"].(string), "Nested(") {
+			declaredNested[columnMap["name"].(string)] = true
+		}
+	}
+	chTable.Columns = normalizeNestedColumns(chTable.Columns, declaredNested)
+
 	tableResource, err := chTable.ToResource()
 	if err != nil {
 		return diag.FromErr(fmt.Errorf("transforming Clickhouse table to resource: %v", err))
@@ -241,6 +268,10 @@ func resourceTableRead(ctx context.Context, d *schema.ResourceData, meta any) di
 		}
 	}
 	// not set - settings
+
+	if err := d.Set("replicas_in_sync", inSync); err != nil {
+		return diag.FromErr(fmt.Errorf("setting replicas_in_sync: %v", err))
+	}
 
 	d.SetId(tableResource.Cluster + ":" + database + ":" + tableName)
 
@@ -381,6 +412,15 @@ func resourceTableUpdate(ctx context.Context, d *schema.ResourceData, meta any) 
 	err := chTableService.UpdateTable(ctx, tableResource, d)
 	if err != nil {
 		return diag.FromErr(err)
+	}
+
+	if d.HasChange("replicas_in_sync") && client.VerifyReplicas && len(client.ReplicaConnections) > 0 {
+		if tableResource.Cluster == "" {
+			tableResource.Cluster = client.DefaultCluster
+		}
+		if err := chTableService.ConvergeReplicas(ctx, tableResource, client.ReplicaConnections); err != nil {
+			return diag.FromErr(err)
+		}
 	}
 
 	return diags
