@@ -55,7 +55,7 @@ func ResourceView() *schema.Resource {
 					return common.FormatSQL(val.(string))
 				},
 				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
-					return queriesEqual(old, new)
+					return queriesEqual(common.FormatSQL(old), common.FormatSQL(new))
 				},
 				DiffSuppressOnRefresh: true,
 			},
