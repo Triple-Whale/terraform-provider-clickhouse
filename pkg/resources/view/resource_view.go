@@ -55,7 +55,7 @@ func ResourceView() *schema.Resource {
 					return common.FormatSQL(val.(string))
 				},
 				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
-					return standardizeString(old) == standardizeString(new)
+					return queriesEqual(old, new)
 				},
 				DiffSuppressOnRefresh: true,
 			},
@@ -131,6 +131,38 @@ func ResourceView() *schema.Resource {
 			},
 		},
 	}
+}
+
+// clickhouse masks secret arguments of table functions (postgresql, mysql, s3, ...) as '[HIDDEN]' in
+// system.tables.as_select, so the stored query can never equal the declared one. Treat each
+// '[HIDDEN]' in the stored value as a wildcard for the string literal in the same position.
+var stringLiteral = regexp.MustCompile(`'(?:[^']|'')*'`)
+
+func queriesEqual(stored, declared string) bool {
+	s, d := standardizeString(stored), standardizeString(declared)
+	if s == d {
+		return true
+	}
+	if !strings.Contains(s, "'[hidden]'") {
+		return false
+	}
+	sl, dl := stringLiteral.FindAllStringIndex(s, -1), stringLiteral.FindAllStringIndex(d, -1)
+	if len(sl) != len(dl) {
+		return false
+	}
+	var b strings.Builder
+	last := 0
+	for i, loc := range dl {
+		b.WriteString(d[last:loc[0]])
+		if s[sl[i][0]:sl[i][1]] == "'[hidden]'" {
+			b.WriteString("'[hidden]'")
+		} else {
+			b.WriteString(d[loc[0]:loc[1]])
+		}
+		last = loc[1]
+	}
+	b.WriteString(d[last:])
+	return s == b.String()
 }
 
 func standardizeString(input string) string {
