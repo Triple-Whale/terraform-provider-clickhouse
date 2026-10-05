@@ -167,6 +167,22 @@ func GetOrderBy(engineFull string) []string {
 	return orderBy
 }
 
+// clickhouse masks secret engine params (PostgreSQL/MySQL passwords) as '[HIDDEN]' in engine_full; keep the declared value
+func keepHiddenParams(read, prior []string) []string {
+	if len(read) != len(prior) {
+		return read
+	}
+	params := make([]string, len(read))
+	for i, param := range read {
+		if strings.EqualFold(param, "'[HIDDEN]'") {
+			params[i] = prior[i]
+			continue
+		}
+		params[i] = param
+	}
+	return params
+}
+
 // without this, terraform sees a diff for Replicated tables
 func removeDefaultParams(engineParams []string) []string {
 	var newEngineParams []string
