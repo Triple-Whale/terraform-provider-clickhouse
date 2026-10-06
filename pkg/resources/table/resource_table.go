@@ -249,7 +249,8 @@ func resourceTableRead(ctx context.Context, d *schema.ResourceData, meta any) di
 		return diag.FromErr(fmt.Errorf("setting engine: %v", err))
 	}
 	if tableResource.EngineParams != nil {
-		if err := d.Set("engine_params", tableResource.EngineParams); err != nil {
+		prior := common.MapArrayInterfaceToArrayOfStrings(d.Get("engine_params").([]interface{}))
+		if err := d.Set("engine_params", keepHiddenParams(tableResource.EngineParams, prior)); err != nil {
 			return diag.FromErr(fmt.Errorf("setting engine_params: %v", err))
 		}
 	}
