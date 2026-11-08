@@ -1,4 +1,4 @@
-FROM golang:1.23.7-bookworm
+FROM golang:1.26.10-bookworm
 
 ARG TARGETARCH
 ARG TERRAFORM_VERSION=1.10.5
