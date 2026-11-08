@@ -13,6 +13,9 @@ type CHRoleService struct {
 }
 
 func (service *CHRoleService) GetRole(ctx context.Context, name string) (*CHRole, error) {
+	if err := service.checkRoleUserCollision(ctx, name); err != nil {
+		return nil, err
+	}
 	rows, err := service.Connection.Query(ctx, "SELECT name, storage FROM system.roles WHERE name = ?", name)
 	if err != nil {
 		return nil, fmt.Errorf("reading role: %w", err)
@@ -60,6 +63,9 @@ func (service *CHRoleService) checkInheritedRoles(ctx context.Context, name stri
 }
 
 func (service *CHRoleService) getGrants(ctx context.Context, name string) ([]Grant, error) {
+	if err := service.checkPrefixGrants(ctx, name); err != nil {
+		return nil, err
+	}
 	query := "SELECT access_type, ifNull(database, '*'), ifNull(table, '*'), ifNull(column, ''), is_partial_revoke, grant_option, isNull(database), isNull(table) FROM system.grants WHERE role_name = ?"
 	rows, err := service.Connection.Query(ctx, query, name)
 	if err != nil {
