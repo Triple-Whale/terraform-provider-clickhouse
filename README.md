@@ -6,6 +6,21 @@ _This template repository is built on the [Terraform Plugin SDK](https://github.
 
 This is a terraform provider plugin for managing Clickhouse databases and tables in a simple way.
 
+SQL access resources are documented in [User](docs/resources/user.md) and
+[Role](docs/resources/role.md). They manage explicit user role memberships and
+default roles, password replacement, and structured database/table grants. For
+clustered access resources, set `cluster` on the resource and configure
+`verify_replicas` plus `replica_hosts` covering every cluster member. These
+resources do not inherit `default_cluster`.
+
+User and Role use JSON import IDs `["cluster", "name"]`; an empty cluster means
+local scope. Names and cluster scope are immutable. Existing XML or startup-script
+ownership must be removed before adopting an entity. Password changes replace the
+active credential immediately and require coordinated application updates.
+
+Run the [isolated two-node access fixture](tests/fixtures/access/README.md) to
+validate access-resource lifecycle and replica reconciliation.
+
 _Note_: This provider it's in a very early state so only few table engines are allowed for replicated tables so far.
 
 
@@ -162,19 +177,28 @@ Creating roles
 
 ```hcl
 resource "clickhouse_role" "my_database_rw" {
-  name       = "my_database_rw"
-  database   = clickhouse_db.test_db_cluster.name
-  privileges = ["SELECT", "INSERT"]
+  name = "my_database_rw"
+  grants = [{
+    database   = clickhouse_db.test_db_cluster.name
+    table      = "*"
+    privileges = ["SELECT", "INSERT"]
+  }]
 }
 ```
 
 Creating users
 
 ```hcl
+variable "service_password" {
+  type      = string
+  sensitive = true
+}
+
 resource "clickhouse_user" "my_database_rw_user" {
-  name     = "my_database_rw_user"
-  password = "awesome_user_password"
-  roles    = [clickhouse_role.my_database_rw.name]
+  name          = "my_database_rw_user"
+  password      = var.service_password
+  roles         = [clickhouse_role.my_database_rw.name]
+  default_roles = [clickhouse_role.my_database_rw.name]
 }
 ```
 

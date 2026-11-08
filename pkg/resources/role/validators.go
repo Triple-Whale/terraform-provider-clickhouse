@@ -2,50 +2,64 @@ package resourcerole
 
 import (
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"strings"
+
+	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 )
 
 var AllowedPrivileges = []string{
-	"SELECT",
-	"INSERT",
-	"ALTER",
-	"CREATE DATABASE",
-	"CREATE TABLE",
-	"CREATE VIEW",
-	"CREATE DICTIONARY",
-	"DROP DATABASE",
-	"DROP TABLE",
-	"SHOW TABLES"}
-
-func ValidatePrivileges(privileges *schema.Set) diag.Diagnostics {
-	var diagnostics diag.Diagnostics
-
-	for _, privilege := range privileges.List() {
-		validatePrivilege(privilege.(string), &diagnostics)
-	}
-	return diagnostics
+	"SELECT", "INSERT", "CREATE DATABASE", "CREATE TABLE", "CREATE VIEW", "CREATE DICTIONARY",
+	"DROP DATABASE", "DROP TABLE", "DROP VIEW", "DROP DICTIONARY", "SHOW DATABASES", "SHOW TABLES",
+	"SHOW COLUMNS", "SHOW DICTIONARIES", "TRUNCATE", "OPTIMIZE", "ALTER UPDATE", "ALTER DELETE",
+	"ALTER ADD COLUMN", "ALTER DROP COLUMN", "ALTER MODIFY COLUMN", "ALTER COMMENT COLUMN",
+	"ALTER CLEAR COLUMN", "ALTER RENAME COLUMN", "ALTER ORDER BY", "ALTER SAMPLE BY",
+	"ALTER ADD INDEX", "ALTER DROP INDEX", "ALTER MATERIALIZE INDEX", "ALTER CLEAR INDEX",
+	"ALTER TTL", "ALTER MATERIALIZE TTL", "ALTER FREEZE PARTITION",
+	"ALTER MOVE PARTITION", "ALTER FETCH PARTITION",
 }
 
-func validatePrivilege(privilege string, diagnostics *diag.Diagnostics) {
-	isAllowed := false
-	upperCasePrivilege := strings.ToUpper(privilege)
-	for _, allowedPrivilege := range AllowedPrivileges {
-		if upperCasePrivilege == allowedPrivilege {
-			isAllowed = true
-			break
+func normalizePrivilege(value interface{}) string {
+	return strings.Join(strings.Fields(strings.ToUpper(value.(string))), " ")
+}
+
+func validatePrivilege(value interface{}, key string) ([]string, []error) {
+	privilege := normalizePrivilege(value)
+	for _, allowed := range AllowedPrivileges {
+		if privilege == allowed {
+			return nil, nil
 		}
 	}
-	if isAllowed == false {
-		diagnostic := diag.Diagnostic{
-			Severity: diag.Error,
-			Summary:  "wrong value",
-			Detail: fmt.Sprintf(
-				"%s isn't in the allowed privileges list: [%s]",
-				privilege,
-				strings.Join(AllowedPrivileges, ", ")),
-		}
-		*diagnostics = append(*diagnostics, diagnostic)
+	return nil, []error{fmt.Errorf("%s: unsupported privilege %q; use a documented atomic database/table privilege", key, privilege)}
+}
+
+func validateName(value interface{}, key string) ([]string, []error) {
+	if err := access.ValidateIdentifier(value.(string)); err != nil {
+		return nil, []error{fmt.Errorf("%s: %w", key, err)}
 	}
+	return nil, nil
+}
+
+func validateCluster(value interface{}, key string) ([]string, []error) {
+	if value.(string) == "" {
+		return nil, nil
+	}
+	return validateName(value, key)
+}
+
+func validateScope(value interface{}, key string) ([]string, []error) {
+	name := value.(string)
+	if name == "*" {
+		return nil, nil
+	}
+	if strings.Contains(name, "*") {
+		return nil, []error{fmt.Errorf("%s: only the complete wildcard '*' is supported", key)}
+	}
+	return validateName(value, key)
+}
+
+func validateTrue(value interface{}, key string) ([]string, []error) {
+	if !value.(bool) {
+		return nil, []error{fmt.Errorf("%s must be true; false is reserved for detected replica drift", key)}
+	}
+	return nil, nil
 }

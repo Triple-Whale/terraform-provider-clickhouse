@@ -1,47 +1,90 @@
 package resourcerole
 
 import (
-	"fmt"
-
-	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"sort"
 )
 
-type CHGrant struct {
-	RoleName   string `ch:"role_name"`
-	AccessType string `ch:"access_type"`
-	Database   string `ch:"database"`
+type Grant struct {
+	Database   string
+	Table      string
+	Privileges []string
+}
+
+type Permission struct {
+	Database  string
+	Table     string
+	Privilege string
 }
 
 type CHRole struct {
-	Name       string `ch:"name"`
-	Privileges []CHGrant
+	Name   string
+	Grants []Grant
 }
 
 type RoleResource struct {
-	Name       string
-	Database   string
-	Privileges *schema.Set
+	Name    string
+	Cluster string
+	Grants  []Grant
 }
 
-func (r *CHRole) ToRoleResource() (*RoleResource, error) {
-	var database string
-	var privileges []string
-	for i := 0; i < len(r.Privileges); i++ {
-		if database != "" && r.Privileges[i].Database != "" && r.Privileges[i].Database != database {
-			return nil, fmt.Errorf("role %s has privileges on different databases", r.Name)
+func permissions(grants []Grant) []Permission {
+	unique := map[Permission]bool{}
+	for _, grant := range grants {
+		for _, privilege := range grant.Privileges {
+			unique[Permission{Database: grant.Database, Table: grant.Table, Privilege: privilege}] = true
 		}
-		database = r.Privileges[i].Database
-		privileges = append(privileges, r.Privileges[i].AccessType)
 	}
-
-	return &RoleResource{Name: r.Name, Database: database, Privileges: common.StringListToSet(privileges)}, nil
+	for candidate := range unique {
+		for broader := range unique {
+			if broader != candidate && broader.Privilege == candidate.Privilege && covers(broader, candidate) {
+				delete(unique, candidate)
+				break
+			}
+		}
+	}
+	result := make([]Permission, 0, len(unique))
+	for permission := range unique {
+		result = append(result, permission)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Database != result[j].Database {
+			return result[i].Database < result[j].Database
+		}
+		if result[i].Table != result[j].Table {
+			return result[i].Table < result[j].Table
+		}
+		return result[i].Privilege < result[j].Privilege
+	})
+	return result
 }
 
-func (r *CHRole) GetPrivilegesList() []string {
-	var privileges []string
-	for _, privilege := range r.Privileges {
-		privileges = append(privileges, privilege.AccessType)
+func covers(broader, narrower Permission) bool {
+	return (broader.Database == "*" || broader.Database == narrower.Database) &&
+		(broader.Table == "*" || broader.Table == narrower.Table)
+}
+
+func sameGrants(left, right []Grant) bool {
+	a, b := permissions(left), permissions(right)
+	if len(a) != len(b) {
+		return false
 	}
-	return privileges
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func grantsFromPermissions(values []Permission) []Grant {
+	result := []Grant{}
+	for _, value := range values {
+		last := len(result) - 1
+		if last >= 0 && result[last].Database == value.Database && result[last].Table == value.Table {
+			result[last].Privileges = append(result[last].Privileges, value.Privilege)
+			continue
+		}
+		result = append(result, Grant{Database: value.Database, Table: value.Table, Privileges: []string{value.Privilege}})
+	}
+	return result
 }

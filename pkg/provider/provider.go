@@ -176,6 +176,7 @@ func configure() func(context.Context, *schema.ResourceData) (any, diag.Diagnost
 		for i := 0; i < retries; i++ {
 			if err := conn.Ping(ctx); err == nil {
 				client := &common.ApiClient{ClickhouseConnection: &conn, DefaultCluster: defaultCluster, VerifyReplicas: verifyReplicas}
+				client.CheckUserPassword = userPasswordVerifier(host, replicaHosts, port, TLSConfig)
 				if verifyReplicas {
 					for _, replicaHost := range replicaHosts {
 						replicaConn, replicaErr := clickhouse.Open(&clickhouse.Options{

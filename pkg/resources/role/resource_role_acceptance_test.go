@@ -2,258 +2,110 @@ package resourcerole_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"regexp"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
 	resourcerole "github.com/Triple-Whale/terraform-provider-clickhouse/pkg/resources/role"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
-
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/testutils"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-type TestStepData struct {
-	roleName   string
-	database   string
-	privileges []string
-}
-
-const roleResourceName = "test_role"
-const roleResource = "clickhouse_role." + roleResourceName
-const roleName1 = "test_role_1"
-const roleName2 = "test_role_2"
-const databaseName1 = "role_role_db_1"
-const databaseName2 = "role_role_db_2"
-
-var testStepsData = []TestStepData{
-	{
-		// Create role
-		roleName: roleName1,
-		database: databaseName1,
-		privileges: []string{
-			"SELECT",
-			"INSERT",
-		},
-	},
-	{
-		// Remove role privileges
-		roleName: roleName1,
-		database: databaseName1,
-		privileges: []string{
-			"SELECT",
-		},
-	},
-	{
-		// Remove and add role privileges
-		roleName: roleName1,
-		database: databaseName1,
-		privileges: []string{
-			"INSERT",
-		},
-	},
-	{
-		// Update db name
-		roleName: roleName1,
-		database: databaseName2,
-		privileges: []string{
-			"INSERT",
-		},
-	},
-	{
-		// Update db name and privileges at the same time
-		roleName: roleName1,
-		database: databaseName1,
-		privileges: []string{
-			"INSERT",
-			"ALTER",
-		},
-	},
-	{
-		// Check all allowed privileges
-		roleName:   roleName1,
-		database:   databaseName1,
-		privileges: resourcerole.AllowedPrivileges,
-	},
-	{
-		// Change role name
-		roleName:   roleName2,
-		database:   databaseName1,
-		privileges: resourcerole.AllowedPrivileges,
-	},
-	{
-		// Change role name and db
-		roleName:   roleName1,
-		database:   databaseName2,
-		privileges: resourcerole.AllowedPrivileges,
-	},
-	{
-		// Change role name, db and privileges
-		roleName: roleName2,
-		database: databaseName1,
-		privileges: []string{
-			"INSERT",
-		},
-	},
-}
-
-func generateTestSteps() []resource.TestStep {
-	var testSteps []resource.TestStep
-	for _, testStepData := range testStepsData {
-		testSteps = append(testSteps, resource.TestStep{
-			Config: testAccRoleResource(
-				testStepData.roleName,
-				testStepData.database,
-				common.Quote(testStepData.privileges),
-			),
-			Check: resource.ComposeTestCheckFunc(
-				resource.TestMatchResourceAttr(
-					roleResource,
-					"name",
-					regexp.MustCompile(testStepData.roleName),
-				),
-				resource.TestMatchResourceAttr(
-					roleResource,
-					"database",
-					regexp.MustCompile(testStepData.database),
-				),
-				testutils.CheckStateSetAttr("privileges", roleResource, testStepData.privileges),
-				testAccCheckRoleResourceExists(testStepData.roleName, testStepData.database, testStepData.privileges),
-			),
-		})
-	}
-	return testSteps
-}
-
 func TestAccResourceRole(t *testing.T) {
-	// Feature tests
+	cluster := os.Getenv("TF_CLICKHOUSE_CLUSTER")
+	name := "terraform_access_role_test"
 	resource.Test(t, resource.TestCase{
-		//ProviderFactories: testutils.GetProviderFactories(),
-		Providers:    testutils.Provider(),
-		CheckDestroy: testAccCheckRoleResourceDestroy([]string{roleName1, roleName2}),
-		Steps:        generateTestSteps(),
-	})
-	// Validate privileges on create
-	resource.Test(t, resource.TestCase{
-		Providers: testutils.Provider(),
-		Steps: []resource.TestStep{
-			{
-				Config: testAccRoleResource(
-					roleName1,
-					databaseName1,
-					common.Quote([]string{"NOT_ALLOWED_PRIVILEGE"}),
-				),
-				ExpectError: regexp.MustCompile("NOT_ALLOWED_PRIVILEGE isn't in the allowed privileges list"),
-			},
-		},
-	})
-	// Validate privileges on update
-	resource.Test(t, resource.TestCase{
-		Providers:    testutils.Provider(),
-		CheckDestroy: testAccCheckRoleResourceDestroy([]string{roleName1}),
-		Steps: []resource.TestStep{
-			{
-				Config: testAccRoleResource(
-					roleName1,
-					databaseName1,
-					common.Quote([]string{"SELECT"}),
-				),
-			},
-			{
-				Config: testAccRoleResource(
-					roleName1,
-					databaseName1,
-					common.Quote([]string{"NOT_ALLOWED_PRIVILEGE"}),
-				),
-				ExpectError: regexp.MustCompile("NOT_ALLOWED_PRIVILEGE isn't in the allowed privileges list"),
-			},
-		},
-	})
-}
-
-func testAccRoleResource(roleName string, database string, privileges []string) string {
-	databaseComment := "db comment"
-	databaseResource := fmt.Sprintf(`
-	resource "clickhouse_db" "%[1]s" {
-		name = "%[1]s"
-		comment = "[3]%s"
-	}
-
-	resource "clickhouse_db" "%[2]s" {
-		name = "%[2]s"
-		comment = "%[3]s"
-	}
-`, databaseName1, databaseName2, databaseComment)
-
-	roleResource := fmt.Sprintf(`
-	resource "clickhouse_role" "test_role" {
-		name = "%[1]s"
-		database = clickhouse_db.%s.name
-		privileges = [%s]
-	}
-`, roleName, database, strings.Join(privileges, ","))
-
-	return fmt.Sprintf("%s\n%s", databaseResource, roleResource)
-}
-
-func testAccCheckRoleResourceExists(roleName string, database string, privileges []string) resource.TestCheckFunc {
-	return func(state *terraform.State) error {
-		client := testutils.TestAccProvider.Meta().(*common.ApiClient)
-		conn := client.ClickhouseConnection
-		chRoleService := resourcerole.CHRoleService{CHConnection: conn}
-
-		dbRole, err := chRoleService.GetRole(context.Background(), roleName)
-
-		if err != nil {
-			return fmt.Errorf("get role: %v", err)
-		}
-		if dbRole == nil {
-			return fmt.Errorf("role %s not found", roleName)
-		}
-
-		if len(privileges) != len(dbRole.Privileges) {
-			return fmt.Errorf("role privileges length mismatching between db and state")
-		}
-
-		for _, privilege := range privileges {
-			var matchedDbRolePrivilege *resourcerole.CHGrant
-			for _, dbRolePrivilege := range dbRole.Privileges {
-				if privilege == dbRolePrivilege.AccessType {
-					matchedDbRolePrivilege = &dbRolePrivilege
-					break
+		ProviderFactories: roleProviders(),
+		CheckDestroy: func(_ *terraform.State) error {
+			client := testutils.TestAccProvider.Meta().(*common.ApiClient)
+			connections, err := access.Connections(client, cluster)
+			if err != nil {
+				return err
+			}
+			for _, conn := range connections {
+				service := resourcerole.CHRoleService{Connection: conn}
+				role, err := service.GetRole(context.Background(), name)
+				if err != nil {
+					return err
+				}
+				if role != nil {
+					return fmt.Errorf("role still exists after destruction")
 				}
 			}
-			if matchedDbRolePrivilege == nil {
-				return fmt.Errorf("role privilege %s not found in db", privilege)
-			}
-			if matchedDbRolePrivilege.Database != database {
-				return fmt.Errorf("role privilege %s database mismatching between db and state", privilege)
-			}
-		}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{Config: roleConfig(cluster, name, `[{database="access_one",table="orders",privileges=["SELECT"]},{database="access_two",table="events",privileges=["INSERT"]}]`),
+				Check: resource.ComposeTestCheckFunc(resource.TestCheckResourceAttr("clickhouse_role.test", "grants.#", "2"), resource.TestCheckResourceAttr("clickhouse_role.test", "replicas_in_sync", "true"))},
+			{ResourceName: "clickhouse_role.test", ImportState: true, ImportStateId: access.ResourceID(cluster, name), ImportStateVerify: true},
+			{Config: roleConfig(cluster, name, `[{database="access_two",table="*",privileges=["SELECT","INSERT"]}]`), Check: resource.TestCheckResourceAttr("clickhouse_role.test", "grants.#", "1")},
+			{Config: roleConfig(cluster, name, `[{database="access_two",table="orders",privileges=["SELECT"]}]`), Check: resource.TestCheckResourceAttr("clickhouse_role.test", "grants.#", "1")},
+			{Config: roleConfig(cluster, name, `[]`), Check: resource.TestCheckResourceAttr("clickhouse_role.test", "grants.#", "0")},
+			{Config: roleConfig(cluster, name, `[{database="access_one",table="orders",privileges=["SELECT"]}]`), Check: resource.TestCheckResourceAttr("clickhouse_role.test", "grants.#", "1")},
+		},
+	})
+}
 
-		return nil
+func TestAccRoleReplicaDrift(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" || os.Getenv("TF_CLICKHOUSE_CLUSTER") == "" {
+		t.Skip("requires the isolated clustered acceptance fixture")
+	}
+	cluster := os.Getenv("TF_CLICKHOUSE_CLUSTER")
+	name := "terraform_access_role_drift_test"
+	config := roleConfig(cluster, name, `[{database="access_one",table="orders",privileges=["SELECT"]}]`)
+	resource.Test(t, resource.TestCase{
+		ProviderFactories: roleProviders(),
+		Steps: []resource.TestStep{
+			{Config: config},
+			{Config: config, PreConfig: func() {
+				client := testutils.TestAccProvider.Meta().(*common.ApiClient)
+				conn := client.ReplicaConnections[len(client.ReplicaConnections)-1]
+				if err := (*conn).Exec(context.Background(), "DROP ROLE "+access.QuoteIdentifier(name)); err != nil {
+					t.Fatal(err)
+				}
+			}, Check: resource.TestCheckResourceAttr("clickhouse_role.test", "replicas_in_sync", "true")},
+			{Config: config, PreConfig: func() {
+				client := testutils.TestAccProvider.Meta().(*common.ApiClient)
+				conn := client.ReplicaConnections[len(client.ReplicaConnections)-1]
+				if err := (*conn).Exec(context.Background(), "GRANT INSERT ON access_one.orders TO "+access.QuoteIdentifier(name)); err != nil {
+					t.Fatal(err)
+				}
+			}, Check: resource.TestCheckResourceAttr("clickhouse_role.test", "replicas_in_sync", "true")},
+		},
+	})
+}
+
+func roleConfig(cluster, name, grants string) string {
+	providerConfig := ""
+	if cluster != "" {
+		hosts := strings.Split(os.Getenv("TF_CLICKHOUSE_REPLICA_HOSTS"), ",")
+		encoded, _ := json.Marshal(hosts)
+		providerConfig = fmt.Sprintf("provider \"clickhouse\" {\n verify_replicas=true\n replica_hosts=%s\n}\n", encoded)
+	}
+	return providerConfig + fmt.Sprintf("resource \"clickhouse_role\" \"test\" {\n name=%q\n cluster=%q\n grants=%s\n}\n", name, cluster, grants)
+}
+
+func roleProviders() map[string]func() (*schema.Provider, error) {
+	return map[string]func() (*schema.Provider, error){
+		"clickhouse": func() (*schema.Provider, error) { return testutils.TestAccProvider, nil },
 	}
 }
 
-func testAccCheckRoleResourceDestroy(roleNames []string) resource.TestCheckFunc {
-	return func(state *terraform.State) error {
-		for _, roleName := range roleNames {
-			client := testutils.TestAccProvider.Meta().(*common.ApiClient)
-			conn := client.ClickhouseConnection
-			chRoleService := resourcerole.CHRoleService{CHConnection: conn}
-
-			dbRole, err := chRoleService.GetRole(context.Background(), roleName)
-
-			if err != nil {
-				return fmt.Errorf("get role: %v", err)
-			}
-
-			if dbRole != nil {
-				return fmt.Errorf("role %s hasn't been deleted", roleName)
-			}
-		}
-		return nil
-	}
+func TestAccRoleAtomicPrivileges(t *testing.T) {
+	cluster := os.Getenv("TF_CLICKHOUSE_CLUSTER")
+	encoded, _ := json.Marshal(resourcerole.AllowedPrivileges)
+	grants := fmt.Sprintf(`[{database="*",table="*",privileges=%s}]`, encoded)
+	resource.Test(t, resource.TestCase{
+		ProviderFactories: roleProviders(),
+		Steps: []resource.TestStep{{
+			Config: roleConfig(cluster, "terraform_access_role_atomic_test", grants),
+			Check:  resource.TestCheckResourceAttr("clickhouse_role.test", "replicas_in_sync", "true"),
+		}},
+	})
 }
