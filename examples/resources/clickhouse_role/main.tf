@@ -1,25 +1,42 @@
-terraform {
-  required_providers {
-    clickhouse = {
-      version = "2.0.0"
-      source  = "hashicorp.com/ivanofthings/clickhouse"
-    }
-  }
+variable "clickhouse_host" {
+  type = string
+}
+
+variable "clickhouse_replica_hosts" {
+  type = list(string)
+}
+
+variable "clickhouse_username" {
+  type = string
+}
+
+variable "clickhouse_password" {
+  type      = string
+  sensitive = true
 }
 
 provider "clickhouse" {
-  port = 8123
+  host            = var.clickhouse_host
+  port            = 9000
+  username        = var.clickhouse_username
+  password        = var.clickhouse_password
+  verify_replicas = true
+  replica_hosts   = var.clickhouse_replica_hosts
 }
 
-resource "clickhouse_db" "awesome_database" {
-  name    = "awesome_database"
-  comment = "This is an awesome database"
+resource "clickhouse_role" "orders_reader" {
+  name    = "orders_reader"
+  cluster = "main"
+  grants = [
+    {
+      database   = "sonic_system"
+      table      = "orders"
+      privileges = ["SELECT"]
+    },
+    {
+      database   = "service_events"
+      table      = "*"
+      privileges = ["INSERT"]
+    },
+  ]
 }
-
-resource "clickhouse_role" "awesome_role" {
-  name       = "awesome_role"
-  database   = clickhouse_db.awesome_database.name
-  privileges = ["INSERT"]
-}
-
-

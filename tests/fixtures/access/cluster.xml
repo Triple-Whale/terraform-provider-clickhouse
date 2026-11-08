@@ -1,0 +1,14 @@
+<clickhouse>
+  <logger><level>warning</level><console>1</console></logger>
+  <macros><shard>1</shard><replica from_env="TEST_REPLICA"/></macros>
+  <zookeeper><node><host>keeper</host><port>9181</port></node></zookeeper>
+  <remote_servers>
+    <main>
+      <shard>
+        <replica><host>ch1</host><port>9000</port></replica>
+        <replica><host>ch2</host><port>9000</port></replica>
+      </shard>
+    </main>
+  </remote_servers>
+  <distributed_ddl><path>/clickhouse/task_queue/ddl</path></distributed_ddl>
+</clickhouse>

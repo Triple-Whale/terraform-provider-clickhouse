@@ -1,0 +1,31 @@
+name: Access resources
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start isolated cluster
+        run: docker compose -f tests/fixtures/access/compose.yaml up -d --wait
+      - name: Build test runner
+        run: docker build -f tests/fixtures/access/Dockerfile -t clickhouse-access-go .
+      - name: User and Role lifecycle
+        run: |
+          docker run --rm --network clickhouse-access-tests_default \
+            -v "$PWD:/src:ro" \
+            -e TF_ACC=1 \
+            -e TF_CLICKHOUSE_HOST=ch1 \
+            -e TF_CLICKHOUSE_PORT=9000 \
+            -e TF_CLICKHOUSE_USERNAME=default \
+            -e TF_CLICKHOUSE_PASSWORD= \
+            -e TF_CLICKHOUSE_CLUSTER=main \
+            -e TF_CLICKHOUSE_REPLICA_HOSTS=ch1,ch2 \
+            clickhouse-access-go go test -v ./pkg/resources/user ./pkg/resources/role
+      - name: Stop fixture
+        if: always()
+        run: docker compose -f tests/fixtures/access/compose.yaml down

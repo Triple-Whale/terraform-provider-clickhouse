@@ -1,37 +1,38 @@
-terraform {
-  required_providers {
-    clickhouse = {
-      version = "2.0.0"
-      source  = "hashicorp.com/ivanofthings/clickhouse"
-    }
-  }
+variable "clickhouse_admin_password" {
+  type      = string
+  sensitive = true
+}
+
+variable "service_password" {
+  type      = string
+  sensitive = true
 }
 
 provider "clickhouse" {
-  port = 8123
+  host            = "clickhouse-1.internal"
+  port            = 9000
+  username        = "provisioner"
+  password        = var.clickhouse_admin_password
+  verify_replicas = true
+  replica_hosts   = ["clickhouse-1.internal", "clickhouse-2.internal"]
 }
 
-resource "clickhouse_db" "awesome_database" {
-  name    = "awesome_database"
-  comment = "This is an awesome database"
+resource "clickhouse_role" "reader" {
+  name    = "service-reader"
+  cluster = "main"
+  grants = [
+    {
+      database   = "analytics"
+      table      = "*"
+      privileges = ["SELECT"]
+    },
+  ]
 }
 
-resource "clickhouse_role" "awesome_role_1" {
-  name       = "awesome_role_1"
-  database   = clickhouse_db.awesome_database.name
-  privileges = ["SELECT"]
+resource "clickhouse_user" "service" {
+  name          = "service-user"
+  cluster       = "main"
+  password      = var.service_password
+  roles         = [clickhouse_role.reader.name]
+  default_roles = [clickhouse_role.reader.name]
 }
-
-resource "clickhouse_role" "awesome_role_2" {
-  name       = "awesome_role_2"
-  database   = clickhouse_db.awesome_database.name
-  privileges = ["INSERT"]
-}
-
-resource "clickhouse_user" "awesome_user" {
-  name     = "awesome_user"
-  password = "awesome_user_password"
-  roles    = [clickhouse_role.awesome_role_1.name, clickhouse_role.awesome_role_2.name]
-}
-
-

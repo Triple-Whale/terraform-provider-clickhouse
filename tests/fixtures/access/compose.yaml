@@ -1,0 +1,46 @@
+name: clickhouse-access-tests
+
+services:
+  keeper:
+    image: clickhouse/clickhouse-server:26.3.62.3
+    entrypoint: [clickhouse, keeper, --config-file=/etc/clickhouse-keeper/config.xml]
+    volumes:
+      - ./keeper.xml:/etc/clickhouse-keeper/config.xml:ro
+  ch1:
+    image: clickhouse/clickhouse-server:26.3.62.3
+    hostname: ch1
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: '1'
+      TEST_REPLICA: '1'
+    ports:
+      - '127.0.0.1:19000:9000'
+      - '127.0.0.1:18123:8123'
+    volumes:
+      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./users.xml:/etc/clickhouse-server/users.d/access.xml:ro
+    depends_on:
+      - keeper
+    healthcheck:
+      test: [CMD, clickhouse-client, --query, SELECT 1]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  ch2:
+    image: clickhouse/clickhouse-server:26.3.62.3
+    hostname: ch2
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: '1'
+      TEST_REPLICA: '2'
+    ports:
+      - '127.0.0.1:19001:9000'
+      - '127.0.0.1:18124:8123'
+    volumes:
+      - ./cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./users.xml:/etc/clickhouse-server/users.d/access.xml:ro
+    depends_on:
+      - keeper
+    healthcheck:
+      test: [CMD, clickhouse-client, --query, SELECT 1]
+      interval: 2s
+      timeout: 2s
+      retries: 60

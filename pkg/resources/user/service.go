@@ -2,137 +2,246 @@ package resourceuser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 )
 
 type CHUserService struct {
-	CHConnection *driver.Conn
+	Connections []access.Connection
 }
 
-func (us *CHUserService) GetUser(ctx context.Context, userName string) (*CHUser, error) {
-	roleQuery := fmt.Sprintf("SELECT name, default_roles_list FROM system.users WHERE name = '%s'", userName)
-
-	rows, err := (*us.CHConnection).Query(ctx, roleQuery)
+func (us *CHUserService) GetUser(ctx context.Context, conn access.Connection, name string) (*CHUser, error) {
+	rows, err := conn.Query(ctx, "SELECT name, storage, arrayMap(x -> toString(x), auth_type), default_roles_all, default_roles_list, default_roles_except FROM system.users WHERE name = "+access.QuoteString(name))
 	if err != nil {
-		return nil, fmt.Errorf("error fetching user: %s", err)
+		return nil, errors.New("could not read ClickHouse user metadata")
 	}
-	if rows.Next() == false {
+	defer rows.Close()
+	if !rows.Next() {
+		if rows.Err() != nil {
+			return nil, errors.New("could not read ClickHouse user metadata")
+		}
 		return nil, nil
 	}
-	var chUser CHUser
-	err = rows.ScanStruct(&chUser)
+	user := &CHUser{}
+	if err := rows.Scan(&user.Name, &user.Storage, &user.AuthTypes, &user.DefaultRolesAll, &user.DefaultRoles, &user.DefaultRolesExcept); err != nil {
+		return nil, errors.New("could not decode ClickHouse user metadata")
+	}
+	if rows.Next() {
+		return nil, errors.New("user name exists in multiple access storages; resolve ownership before managing it")
+	}
+	if rows.Err() != nil {
+		return nil, errors.New("could not read ClickHouse user metadata")
+	}
+	if err := rows.Close(); err != nil {
+		return nil, errors.New("could not close ClickHouse user metadata response")
+	}
+	if user.Storage != "local_directory" {
+		return nil, errors.New("only SQL users in local_directory storage can be managed; XML and replicated access users require a separate migration")
+	}
+	grants, err := conn.Query(ctx, "SELECT granted_role_name, with_admin_option FROM system.role_grants WHERE user_name = "+access.QuoteString(name))
 	if err != nil {
-		return nil, fmt.Errorf("error scanning user: %s", err)
+		return nil, errors.New("could not read ClickHouse user role assignments")
 	}
-
-	return &chUser, nil
-}
-
-func (us *CHUserService) CreateUser(ctx context.Context, userPlan UserResource) (*CHUser, error) {
-	var rolesList []string
-
-	for _, role := range userPlan.Roles.List() {
-		rolesList = append(rolesList, role.(string))
-	}
-	query := fmt.Sprintf(
-		"CREATE USER %s IDENTIFIED WITH sha256_password BY '%s'",
-		userPlan.Name,
-		userPlan.Password,
-	)
-
-	if len(rolesList) > 0 {
-		query = fmt.Sprintf("%s DEFAULT ROLE %s", query, strings.Join(rolesList, ","))
-	}
-	err := (*us.CHConnection).Exec(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("error creating user: %s", err)
-	}
-	return us.GetUser(ctx, userPlan.Name)
-}
-
-func (us *CHUserService) UpdateUser(ctx context.Context, userPlan UserResource, resourceData *schema.ResourceData) (*CHUser, error) {
-	conn := *us.CHConnection
-	stateUserName, _ := resourceData.GetChange("name")
-	user, err := us.GetUser(ctx, stateUserName.(string))
-	if err != nil {
-		return nil, fmt.Errorf("error fetching user: %s", err)
-	}
-	if user == nil {
-		return nil, fmt.Errorf("user %s not found", userPlan.Name)
-	}
-
-	userNameHasChange := resourceData.HasChange("name")
-	userPasswordHasChange := resourceData.HasChange("password")
-	userRolesHasChange := resourceData.HasChange("roles")
-
-	var grantRoles []string
-	var revokeRoles []string
-	if userRolesHasChange {
-		for _, planRole := range userPlan.Roles.List() {
-			found := false
-			for _, role := range user.Roles {
-				if role == planRole {
-					found = true
-				}
-			}
-			if found == false {
-				grantRoles = append(grantRoles, planRole.(string))
-			}
+	defer grants.Close()
+	for grants.Next() {
+		var role string
+		var admin uint8
+		if err := grants.Scan(&role, &admin); err != nil {
+			return nil, errors.New("could not decode ClickHouse user role assignments")
 		}
+		user.Roles = append(user.Roles, role)
+		if admin != 0 {
+			user.AdminRoles = append(user.AdminRoles, role)
+		}
+	}
+	if grants.Err() != nil {
+		return nil, errors.New("could not read ClickHouse user role assignments")
+	}
+	if err := rejectDirectGrants(ctx, conn, name); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
 
+func rejectDirectGrants(ctx context.Context, conn access.Connection, name string) error {
+	rows, err := conn.Query(ctx, "SELECT access_type FROM system.grants WHERE user_name = "+access.QuoteString(name)+" LIMIT 1")
+	if err != nil {
+		return errors.New("could not inspect direct user privileges")
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("user has direct privilege grants; remove or migrate them explicitly before managing role-based access")
+	}
+	if rows.Err() != nil {
+		return errors.New("could not inspect direct user privileges")
+	}
+	return nil
+}
+
+func (us *CHUserService) ReadAll(ctx context.Context, name string) ([]*CHUser, error) {
+	users := make([]*CHUser, len(us.Connections))
+	for i, conn := range us.Connections {
+		user, err := us.GetUser(ctx, conn, name)
+		if err != nil {
+			return nil, fmt.Errorf("replica %d: %w", i, err)
+		}
+		users[i] = user
+	}
+	return users, nil
+}
+
+func (us *CHUserService) exec(ctx context.Context, query, operation string) error {
+	if err := us.Connections[0].Exec(ctx, query); err != nil {
+		return fmt.Errorf("ClickHouse %s failed; credential-bearing database diagnostics are suppressed", operation)
+	}
+	return nil
+}
+
+func userSQL(plan UserResource, verb string) string {
+	prefix := verb + " USER "
+	if verb == "CREATE IF NOT EXISTS" {
+		prefix = "CREATE USER IF NOT EXISTS "
+	}
+	return prefix + access.QuoteIdentifier(plan.Name) + access.ClusterClause(plan.Cluster) + " IDENTIFIED WITH sha256_hash BY " + access.QuoteString(passwordHash(plan.Password))
+}
+
+func (us *CHUserService) Create(ctx context.Context, plan UserResource, created func()) error {
+	users, err := us.ReadAll(ctx, plan.Name)
+	if err != nil {
+		return err
+	}
+	for _, user := range users {
+		if user != nil {
+			return errors.New("user already exists; import it explicitly instead of creating or replacing it")
+		}
+	}
+	err = us.Connections[0].Exec(ctx, userSQL(plan, "CREATE")+" DEFAULT ROLE NONE")
+	if err != nil {
+		if access.IsCreateCollision(err) {
+			return errors.New("user creation encountered an existing name; ownership was not recorded; inspect all replicas and import explicitly before managing it")
+		}
+		if access.CreateMayHaveSucceeded(err, plan.Cluster) {
+			created()
+			return errors.New("user creation may have partially completed; resource state retained for reconciliation; credential-bearing database diagnostics are suppressed")
+		}
+		return errors.New("ClickHouse rejected user creation; credential-bearing database diagnostics are suppressed")
+	}
+	created()
+	return us.Reconcile(ctx, plan)
+}
+
+func quotedRoles(roles []string) string {
+	result := make([]string, len(roles))
+	for i, role := range sorted(roles) {
+		result[i] = access.QuoteIdentifier(role)
+	}
+	return strings.Join(result, ", ")
+}
+
+func (us *CHUserService) Reconcile(ctx context.Context, plan UserResource) error {
+	users, err := us.ReadAll(ctx, plan.Name)
+	if err != nil {
+		return err
+	}
+	missing := false
+	extras := map[string]bool{}
+	admins := map[string]bool{}
+	for _, user := range users {
+		if user == nil {
+			missing = true
+			continue
+		}
 		for _, role := range user.Roles {
-			if userPlan.Roles.Contains(role) == false {
-				revokeRoles = append(revokeRoles, role)
+			if !includes(plan.Roles, role) {
+				extras[role] = true
 			}
 		}
-	}
-
-	if len(grantRoles) > 0 {
-		err := conn.Exec(ctx, fmt.Sprintf("GRANT %s TO %s", strings.Join(grantRoles, ","), stateUserName))
-		if err != nil {
-			return nil, fmt.Errorf("error granting roles to user: %s", err)
+		for _, role := range user.AdminRoles {
+			admins[role] = true
 		}
 	}
-
-	if len(revokeRoles) > 0 {
-		err := conn.Exec(ctx, fmt.Sprintf("REVOKE %s FROM %s", strings.Join(revokeRoles, ","), stateUserName))
-		if err != nil {
-			return nil, fmt.Errorf("error revoking roles from user: %s", err)
+	if missing {
+		if err := us.exec(ctx, userSQL(plan, "CREATE IF NOT EXISTS"), "missing user repair"); err != nil {
+			return err
 		}
 	}
-
-	var changeNameClause string
-	var changePasswordClause string
-
-	if userNameHasChange {
-		changeNameClause = fmt.Sprintf(" RENAME TO %s", userPlan.Name)
+	if err := us.exec(ctx, userSQL(plan, "ALTER"), "password update"); err != nil {
+		return err
 	}
-
-	if userPasswordHasChange {
-		changePasswordClause = fmt.Sprintf(" IDENTIFIED with sha256_password BY '%s'", userPlan.Password)
+	target := access.QuoteIdentifier(plan.Name)
+	cluster := access.ClusterClause(plan.Cluster)
+	if err := us.exec(ctx, "ALTER USER "+target+cluster+" DEFAULT ROLE NONE", "default role reset"); err != nil {
+		return err
 	}
-
-	// After modify original role grants, we need to update default roles
-	query := fmt.Sprintf(
-		"ALTER USER %s%s%s DEFAULT ROLE %s",
-		stateUserName,
-		changeNameClause,
-		changePasswordClause,
-		strings.Join(common.StringSetToList(userPlan.Roles), ","),
-	)
-	err = conn.Exec(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("error updating user: %s", err)
+	for _, role := range mapKeys(extras) {
+		if err := us.exec(ctx, "REVOKE"+cluster+" "+access.QuoteIdentifier(role)+" FROM "+target, "role revocation"); err != nil {
+			return err
+		}
 	}
-
-	return us.GetUser(ctx, userPlan.Name)
+	for _, role := range mapKeys(admins) {
+		if !includes(plan.Roles, role) {
+			continue
+		}
+		if err := us.exec(ctx, "REVOKE"+cluster+" ADMIN OPTION FOR "+access.QuoteIdentifier(role)+" FROM "+target, "admin option revocation"); err != nil {
+			return err
+		}
+	}
+	if len(plan.Roles) > 0 {
+		if err := us.exec(ctx, "GRANT"+cluster+" "+quotedRoles(plan.Roles)+" TO "+target, "role assignment"); err != nil {
+			return err
+		}
+	}
+	defaults := "NONE"
+	if len(plan.DefaultRoles) > 0 {
+		defaults = quotedRoles(plan.DefaultRoles)
+	}
+	return us.exec(ctx, "ALTER USER "+target+cluster+" DEFAULT ROLE "+defaults, "default role update")
 }
 
-func (us *CHUserService) DeleteUser(ctx context.Context, name string) error {
-	return (*us.CHConnection).Exec(ctx, fmt.Sprintf("DROP USER %s", name))
+func mapKeys(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	return sorted(result)
+}
+
+func (us *CHUserService) Verify(ctx context.Context, plan UserResource, timeout time.Duration) error {
+	return access.Wait(ctx, timeout, func(ctx context.Context) (bool, error) {
+		users, err := us.ReadAll(ctx, plan.Name)
+		if err != nil {
+			return false, err
+		}
+		for _, user := range users {
+			if !matchesPlan(user, plan) {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+}
+
+func (us *CHUserService) Delete(ctx context.Context, name, cluster string, timeout time.Duration) error {
+	if _, err := us.ReadAll(ctx, name); err != nil {
+		return err
+	}
+	if err := us.exec(ctx, "DROP USER IF EXISTS "+access.QuoteIdentifier(name)+access.ClusterClause(cluster), "user deletion"); err != nil {
+		return err
+	}
+	return access.Wait(ctx, timeout, func(ctx context.Context) (bool, error) {
+		users, err := us.ReadAll(ctx, name)
+		if err != nil {
+			return false, err
+		}
+		for _, user := range users {
+			if user != nil {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
 }
