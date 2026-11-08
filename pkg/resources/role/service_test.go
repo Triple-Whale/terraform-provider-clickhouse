@@ -83,6 +83,8 @@ func TestRoleReadRejectsUnsupportedOwnership(t *testing.T) {
 				switch {
 				case strings.Contains(query, "system.roles"):
 					return &testRows{values: [][]interface{}{{"role", test.storage}}}, nil
+				case strings.Contains(query, "system.users"), strings.HasPrefix(query, "SHOW GRANTS FOR "):
+					return &testRows{}, nil
 				case strings.Contains(query, "system.privileges"):
 					return &testRows{}, nil
 				case strings.Contains(query, "system.role_grants"):
@@ -205,6 +207,9 @@ func TestResourceRoleCreateRejectsCollision(t *testing.T) {
 
 func TestRoleReadRejectsAmbiguousIdentity(t *testing.T) {
 	conn := &testConnection{query: func(query string, _ ...interface{}) (driver.Rows, error) {
+		if strings.Contains(query, "system.users") {
+			return &testRows{}, nil
+		}
 		if !strings.Contains(query, "system.roles") {
 			t.Fatal("ambiguous identity must fail before inspecting privileges")
 		}
