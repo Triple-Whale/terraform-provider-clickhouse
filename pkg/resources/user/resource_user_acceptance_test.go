@@ -214,3 +214,84 @@ func TestAccUserGrantDenialPreservesState(t *testing.T) {
 		}
 	}
 }
+
+func TestAccUserDirectGrants(t *testing.T) {
+	client := fixtureClient(t, "default", "", true)
+	ctx := context.Background()
+	cluster := os.Getenv("TF_CLICKHOUSE_CLUSTER")
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	name, role := "tf-direct-"+suffix, "tf-inherited-"+suffix
+	clause := access.ClusterClause(cluster)
+	execute(t, client, "CREATE ROLE "+access.QuoteIdentifier(role)+clause)
+	execute(t, client, "GRANT"+clause+" SELECT ON system.one TO "+access.QuoteIdentifier(role))
+	t.Cleanup(func() {
+		(*client.ClickhouseConnection).Exec(ctx, "DROP USER IF EXISTS "+access.QuoteIdentifier(name)+clause)
+		(*client.ClickhouseConnection).Exec(ctx, "DROP ROLE IF EXISTS "+access.QuoteIdentifier(role)+clause)
+	})
+	makeData := func(password, table string) *schema.ResourceData {
+		d := userData(t, name, cluster, password, []string{role}, []string{role})
+		if table != "" {
+			if err := d.Set("grants", []interface{}{map[string]interface{}{"database": "system", "table": table, "privileges": []interface{}{"SELECT"}}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return d
+	}
+	r := resourceuser.ResourceUser()
+	initial := makeData("Fixture-Direct-42!", "numbers")
+	if diags := r.CreateContext(ctx, initial, client); diags.HasError() {
+		t.Fatal(diags)
+	}
+	if initial.Get("grants").(*schema.Set).Len() != 1 {
+		t.Fatal("direct grant was not persisted")
+	}
+	updated := makeData("Fixture-Direct-43!", "one")
+	updated.SetId(initial.Id())
+	if diags := r.UpdateContext(ctx, updated, client); diags.HasError() {
+		t.Fatal(diags)
+	}
+	checkLogin(t, name, "Fixture-Direct-43!", true)
+	checkLogin(t, name, "Fixture-Direct-42!", false)
+	imported := schema.TestResourceDataRaw(t, r.Schema, nil)
+	imported.SetId(initial.Id())
+	if _, err := r.Importer.StateContext(ctx, imported, client); err != nil {
+		t.Fatal(err)
+	}
+	if diags := r.ReadContext(ctx, imported, client); diags.HasError() {
+		t.Fatal(diags)
+	}
+	if !imported.Get("grants").(*schema.Set).Equal(updated.Get("grants").(*schema.Set)) {
+		t.Fatal("import did not restore direct privileges")
+	}
+	if len(client.ReplicaConnections) > 0 && cluster != "" {
+		replica := *client.ReplicaConnections[len(client.ReplicaConnections)-1]
+		if err := replica.Exec(ctx, "REVOKE SELECT ON system.one FROM "+access.QuoteIdentifier(name)); err != nil {
+			t.Fatal(err)
+		}
+		if err := replica.Exec(ctx, "GRANT SELECT ON system.numbers TO "+access.QuoteIdentifier(name)); err != nil {
+			t.Fatal(err)
+		}
+		if diags := r.ReadContext(ctx, updated, client); diags.HasError() {
+			t.Fatal(diags)
+		}
+		if updated.Get("replicas_in_sync").(bool) {
+			t.Fatal("direct grant replica drift was missed")
+		}
+		repair := makeData("Fixture-Direct-43!", "one")
+		repair.SetId(initial.Id())
+		if diags := r.UpdateContext(ctx, repair, client); diags.HasError() {
+			t.Fatal(diags)
+		}
+		if !repair.Get("replicas_in_sync").(bool) {
+			t.Fatal("direct grant replica repair did not converge")
+		}
+	}
+	empty := makeData("Fixture-Direct-43!", "")
+	empty.SetId(initial.Id())
+	if diags := r.UpdateContext(ctx, empty, client); diags.HasError() {
+		t.Fatal(diags)
+	}
+	if empty.Get("grants").(*schema.Set).Len() != 0 || empty.Get("roles").(*schema.Set).Len() != 1 || empty.Get("default_roles").(*schema.Set).Len() != 1 {
+		t.Fatal("revoking direct privileges changed inherited role membership")
+	}
+}

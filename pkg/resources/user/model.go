@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sort"
+
+	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 )
 
 type CHUser struct {
@@ -15,6 +17,7 @@ type CHUser struct {
 	DefaultRolesAll    uint8
 	DefaultRolesExcept []string
 	AdminRoles         []string
+	Grants             []grants.Grant
 }
 
 type UserResource struct {
@@ -23,6 +26,7 @@ type UserResource struct {
 	Password     string
 	Roles        []string
 	DefaultRoles []string
+	Grants       []grants.Grant
 }
 
 func passwordHash(password string) string {
@@ -79,9 +83,9 @@ func sameUser(a, b *CHUser) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.Storage == b.Storage && equalStrings(a.Roles, b.Roles) && equalStrings(a.effectiveDefaults(), b.effectiveDefaults()) && a.canonical() && b.canonical()
+	return a.Storage == b.Storage && equalStrings(a.Roles, b.Roles) && equalStrings(a.effectiveDefaults(), b.effectiveDefaults()) && grants.Equal(a.Grants, b.Grants) && a.canonical() && b.canonical()
 }
 
 func matchesPlan(user *CHUser, plan UserResource) bool {
-	return user != nil && user.canonical() && equalStrings(user.Roles, plan.Roles) && equalStrings(user.DefaultRoles, plan.DefaultRoles)
+	return user != nil && user.canonical() && equalStrings(user.Roles, plan.Roles) && equalStrings(user.DefaultRoles, plan.DefaultRoles) && grants.Equal(user.Grants, plan.Grants)
 }

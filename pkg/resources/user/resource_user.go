@@ -8,6 +8,7 @@ import (
 
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
+	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
@@ -23,15 +24,20 @@ func ResourceUser() *schema.Resource {
 		return &schema.Schema{Description: description, Type: schema.TypeSet, Optional: true, Elem: &schema.Schema{Type: schema.TypeString, ValidateFunc: identifier}}
 	}
 	return &schema.Resource{
-		Description:   "Manage a SQL user, its password, exact assigned roles, and explicit default roles.",
+		Description:   "Manage a SQL user, its password, direct grants, exact assigned roles, and explicit default roles.",
 		CreateContext: resourceUserCreate, ReadContext: resourceUserRead, UpdateContext: resourceUserUpdate, DeleteContext: resourceUserDelete,
 		Importer: &schema.ResourceImporter{StateContext: access.ImportState},
 		Timeouts: &schema.ResourceTimeout{Create: schema.DefaultTimeout(2 * time.Minute), Update: schema.DefaultTimeout(2 * time.Minute), Delete: schema.DefaultTimeout(2 * time.Minute), Read: schema.DefaultTimeout(2 * time.Minute)},
 		CustomizeDiff: func(ctx context.Context, d *schema.ResourceDiff, meta interface{}) error {
-			if !d.NewValueKnown("roles") || !d.NewValueKnown("default_roles") {
-				return nil
+			if d.NewValueKnown("grants") {
+				if _, err := grants.Decode(d.Get("grants").(*schema.Set)); err != nil {
+					return err
+				}
 			}
-			return validatePlan(planFromData(d))
+			if d.NewValueKnown("roles") && d.NewValueKnown("default_roles") {
+				return validatePlan(UserResource{Roles: setStrings(d.Get("roles").(*schema.Set)), DefaultRoles: setStrings(d.Get("default_roles").(*schema.Set))})
+			}
+			return nil
 		},
 		Schema: map[string]*schema.Schema{
 			"name": {Description: "SQL user name. Changing it replaces the resource.", Type: schema.TypeString, Required: true, ForceNew: true, ValidateFunc: identifier},
@@ -48,6 +54,7 @@ func ResourceUser() *schema.Resource {
 				return nil, nil
 			}},
 			"roles":         roleSet("Exact assigned roles without ADMIN OPTION; independent from defaults."),
+			"grants":        grants.Schema(false),
 			"default_roles": roleSet("Explicit default roles, each also assigned in roles. Empty means DEFAULT ROLE NONE."),
 			"replicas_in_sync": {Description: "Desired true. Refresh sets false on metadata or password divergence; apply repairs it. Must not be configured false.", Type: schema.TypeBool, Optional: true, Default: true, ValidateFunc: func(v interface{}, k string) ([]string, []error) {
 				if !v.(bool) {
@@ -61,8 +68,9 @@ func ResourceUser() *schema.Resource {
 
 type dataGetter interface{ Get(string) interface{} }
 
-func planFromData(d dataGetter) UserResource {
-	return UserResource{Name: d.Get("name").(string), Cluster: d.Get("cluster").(string), Password: d.Get("password").(string), Roles: setStrings(d.Get("roles").(*schema.Set)), DefaultRoles: setStrings(d.Get("default_roles").(*schema.Set))}
+func planFromData(d dataGetter) (UserResource, error) {
+	directGrants, err := grants.Decode(d.Get("grants").(*schema.Set))
+	return UserResource{Name: d.Get("name").(string), Cluster: d.Get("cluster").(string), Password: d.Get("password").(string), Roles: setStrings(d.Get("roles").(*schema.Set)), DefaultRoles: setStrings(d.Get("default_roles").(*schema.Set)), Grants: directGrants}, err
 }
 func setStrings(set *schema.Set) []string {
 	result := make([]string, 0, set.Len())
@@ -133,7 +141,7 @@ func resourceUserRead(ctx context.Context, d *schema.ResourceData, meta interfac
 			return diag.FromErr(errors.New("could not verify ClickHouse user password; resource retained"))
 		}
 	}
-	for key, value := range map[string]interface{}{"name": name, "cluster": cluster, "roles": representative.Roles, "default_roles": representative.effectiveDefaults(), "replicas_in_sync": inSync} {
+	for key, value := range map[string]interface{}{"name": name, "cluster": cluster, "roles": representative.Roles, "default_roles": representative.effectiveDefaults(), "grants": grants.State(representative.Grants), "replicas_in_sync": inSync} {
 		if err := d.Set(key, value); err != nil {
 			return diag.FromErr(err)
 		}
@@ -147,7 +155,10 @@ func applyUser(ctx context.Context, d *schema.ResourceData, meta interface{}, cr
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	plan := planFromData(d)
+	plan, err := planFromData(d)
+	if err != nil {
+		return diag.FromErr(err)
+	}
 	if err := validatePlan(plan); err != nil {
 		return diag.FromErr(err)
 	}

@@ -35,4 +35,11 @@ resource "clickhouse_user" "service" {
   password      = var.service_password
   roles         = [clickhouse_role.reader.name]
   default_roles = [clickhouse_role.reader.name]
+  grants = [
+    {
+      database   = "analytics"
+      table      = "events"
+      privileges = ["INSERT"]
+    },
+  ]
 }

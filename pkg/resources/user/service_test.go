@@ -3,6 +3,7 @@ package resourceuser
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
+	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
@@ -36,13 +38,15 @@ func (r *userRows) Err() error                       { return r.failure }
 
 type userConn struct {
 	driver.Conn
-	user         *CHUser
-	queries      []string
-	executed     []string
-	failPrefix   string
-	rows         []*userRows
-	rowFailure   error
-	directGrants bool
+	user          *CHUser
+	queries       []string
+	executed      []string
+	failPrefix    string
+	rows          []*userRows
+	rowFailure    error
+	grantRows     [][]interface{}
+	grantSQL      []string
+	roleCollision bool
 }
 
 func (c *userConn) Query(ctx context.Context, q string, args ...interface{}) (driver.Rows, error) {
@@ -62,8 +66,34 @@ func (c *userConn) Query(ctx context.Context, q string, args ...interface{}) (dr
 			}
 		}
 	}
-	if c.directGrants && strings.Contains(q, "FROM system.grants") {
-		r.values = [][]interface{}{{"SELECT"}}
+	if strings.Contains(q, "FROM system.roles") && c.roleCollision {
+		r.values = [][]interface{}{{"svc-user"}}
+	}
+	if strings.HasPrefix(q, "SHOW GRANTS FOR ") {
+		for _, statement := range c.grantSQL {
+			r.values = append(r.values, []interface{}{statement})
+		}
+	}
+	if strings.Contains(q, "FROM system.grants") {
+		if !strings.Contains(q, "WHERE user_name = ?") || len(args) != 1 {
+			return nil, errors.New("direct grants must be scoped to the user")
+		}
+		if c.grantRows != nil {
+			r.values = c.grantRows
+		} else if c.user != nil {
+			for _, grant := range c.user.Grants {
+				var databaseNull, tableNull uint8
+				if grant.Database == "*" {
+					databaseNull = 1
+				}
+				if grant.Table == "*" {
+					tableNull = 1
+				}
+				for _, privilege := range grant.Privileges {
+					r.values = append(r.values, []interface{}{privilege, grant.Database, grant.Table, "", uint8(0), uint8(0), databaseNull, tableNull})
+				}
+			}
+		}
 	}
 	c.rows = append(c.rows, r)
 	return r, nil
@@ -219,13 +249,127 @@ func TestUserSchema(t *testing.T) {
 	}
 }
 
-func TestUserRejectsUnmanagedDirectPrivileges(t *testing.T) {
-	conn := &userConn{user: testUser(), directGrants: true}
+func TestUserReadDirectPrivileges(t *testing.T) {
+	conn := &userConn{user: testUser()}
+	conn.user.Grants = []grants.Grant{{Database: "db", Table: "*", Privileges: []string{"SELECT"}}}
 	service := CHUserService{Connections: []access.Connection{conn}}
-	if _, err := service.ReadAll(context.Background(), "svc-user"); err == nil || !strings.Contains(err.Error(), "direct privilege grants") {
-		t.Fatal("direct grants must not be silently adopted")
+	users, err := service.ReadAll(context.Background(), "svc-user")
+	if err != nil || !grants.Equal(users[0].Grants, conn.user.Grants) {
+		t.Fatalf("direct privileges were not read: %v", err)
 	}
 	if len(conn.executed) != 0 {
-		t.Fatal("direct grant rejection must not mutate")
+		t.Fatal("reading direct grants must not mutate")
+	}
+}
+
+func TestUserDirectGrantReconciliation(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprint("empty=", empty), func(t *testing.T) {
+			first := &userConn{user: &CHUser{Name: "svc-user", Storage: "local_directory", AuthTypes: []string{"sha256_password"}, Grants: []grants.Grant{{Database: "old", Table: "*", Privileges: []string{"SELECT"}}}}}
+			second := &userConn{user: &CHUser{Name: "svc-user", Storage: "local_directory", AuthTypes: []string{"sha256_password"}, Grants: []grants.Grant{{Database: "extra", Table: "orders", Privileges: []string{"INSERT"}}}}}
+			plan := UserResource{Name: "svc-user", Cluster: "main", Password: "secret-password", Roles: []string{"reader"}, DefaultRoles: []string{"reader"}}
+			if !empty {
+				plan.Grants = []grants.Grant{{Database: "target", Table: "orders", Privileges: []string{"SELECT"}}}
+			}
+			service := CHUserService{Connections: []access.Connection{first, second}}
+			if err := service.Reconcile(context.Background(), plan); err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Join(first.executed, "\n")
+			for _, want := range []string{"REVOKE ON CLUSTER `main` SELECT ON `old`.* FROM `svc-user`", "REVOKE ON CLUSTER `main` INSERT ON `extra`.`orders` FROM `svc-user`", "GRANT ON CLUSTER `main` `reader` TO `svc-user`", "DEFAULT ROLE `reader`"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("missing operation %s in %s", want, got)
+				}
+			}
+			if strings.Contains(got, "GRANT ON CLUSTER `main` SELECT ON `target`.`orders` TO `svc-user`") == empty {
+				t.Fatal("desired direct grants were not reconciled")
+			}
+			if len(second.executed) != 0 || strings.Contains(got, "CREATE ROLE") {
+				t.Fatal("must use distributed grants without creating roles")
+			}
+		})
+	}
+}
+
+func TestUserDirectGrantDrift(t *testing.T) {
+	user := &CHUser{Name: "svc-user", Storage: "local_directory", AuthTypes: []string{"sha256_password"}, Grants: []grants.Grant{{Database: "db", Table: "*", Privileges: []string{"SELECT"}}}}
+	plan := UserResource{Name: user.Name, Grants: user.Grants}
+	if !matchesPlan(user, plan) || !sameUser(user, user) {
+		t.Fatal("equal grants should converge")
+	}
+	other := *user
+	other.Grants = nil
+	if matchesPlan(&other, plan) || sameUser(user, &other) {
+		t.Fatal("direct grant drift was missed")
+	}
+	conn := &userConn{user: user}
+	var driverConn driver.Conn = conn
+	client := &common.ApiClient{ClickhouseConnection: &driverConn, CheckUserPassword: func(context.Context, string, string, string) error { return nil }}
+	data := schema.TestResourceDataRaw(t, ResourceUser().Schema, map[string]interface{}{"name": user.Name, "password": "p"})
+	data.SetId(access.ResourceID("", user.Name))
+	if diags := resourceUserRead(context.Background(), data, client); diags.HasError() {
+		t.Fatal(diags)
+	}
+	observed, err := planFromData(data)
+	if err != nil || !grants.Equal(observed.Grants, user.Grants) || len(conn.executed) != 0 {
+		t.Fatal("refresh must record direct grants without writing")
+	}
+}
+
+func TestUserRejectsUnsupportedDirectGrantsAndCollisions(t *testing.T) {
+	for _, column := range []string{"column", "grant option", "partial revoke", "prefix", "literal star", "collision"} {
+		t.Run(column, func(t *testing.T) {
+			conn := &userConn{user: testUser()}
+			row := []interface{}{"SELECT", "db", "orders", "", uint8(0), uint8(0), uint8(0), uint8(0)}
+			switch column {
+			case "column":
+				row[3] = "secret"
+			case "grant option":
+				row[5] = uint8(1)
+			case "partial revoke":
+				row[4] = uint8(1)
+			case "prefix":
+				conn.grantSQL = []string{"GRANT SELECT ON db.orders* TO `svc-user`"}
+			case "literal star":
+				row[1] = "*"
+			case "collision":
+				conn.roleCollision = true
+			}
+			conn.grantRows = [][]interface{}{row}
+			service := CHUserService{Connections: []access.Connection{conn}}
+			if _, err := service.ReadAll(context.Background(), "svc-user"); err == nil || len(conn.executed) != 0 {
+				t.Fatal("unsupported grants/ownership must fail without mutations")
+			}
+		})
+	}
+}
+
+func TestUserDirectGrantFailureRetainsState(t *testing.T) {
+	conn := &userConn{failPrefix: "GRANT SELECT ON"}
+	service := CHUserService{Connections: []access.Connection{conn}}
+	retained := false
+	err := service.Create(context.Background(), UserResource{Name: "svc-user", Password: "secret-password", Grants: []grants.Grant{{Database: "db", Table: "*", Privileges: []string{"SELECT"}}}}, func() { retained = true })
+	if err == nil || !retained {
+		t.Fatal("direct grant failure must retain created user identity")
+	}
+	if strings.Contains(err.Error(), "secret-password") || strings.Contains(err.Error(), passwordHash("secret-password")) {
+		t.Fatal("direct grant diagnostics leaked credentials")
+	}
+}
+
+func TestUserGrantSchemaValidation(t *testing.T) {
+	resource := ResourceUser()
+	if err := resource.InternalValidate(nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if !resource.Schema["grants"].Optional || resource.Schema["grants"].Computed {
+		t.Fatal("user direct grants must be optional and authoritative")
+	}
+	data := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{"name": "svc-user", "password": "p", "grants": []interface{}{
+		map[string]interface{}{"database": "db", "table": "orders", "privileges": []interface{}{"SELECT"}},
+		map[string]interface{}{"database": "db", "table": "*", "privileges": []interface{}{"SELECT"}},
+	}})
+	if _, err := planFromData(data); err == nil {
+		t.Fatal("overlapping direct scopes were accepted")
 	}
 }

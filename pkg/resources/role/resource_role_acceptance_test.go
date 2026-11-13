@@ -10,6 +10,7 @@ import (
 
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
+	grantpolicy "github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 	resourcerole "github.com/Triple-Whale/terraform-provider-clickhouse/pkg/resources/role"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/testutils"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
@@ -99,7 +100,7 @@ func roleProviders() map[string]func() (*schema.Provider, error) {
 
 func TestAccRoleAtomicPrivileges(t *testing.T) {
 	cluster := os.Getenv("TF_CLICKHOUSE_CLUSTER")
-	encoded, _ := json.Marshal(resourcerole.AllowedPrivileges)
+	encoded, _ := json.Marshal(grantpolicy.AllowedPrivileges)
 	grants := fmt.Sprintf(`[{database="*",table="*",privileges=%s}]`, encoded)
 	resource.Test(t, resource.TestCase{
 		ProviderFactories: roleProviders(),

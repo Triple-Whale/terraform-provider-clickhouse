@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
+	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 )
 
 type CHUserService struct {
@@ -15,6 +16,9 @@ type CHUserService struct {
 }
 
 func (us *CHUserService) GetUser(ctx context.Context, conn access.Connection, name string) (*CHUser, error) {
+	if err := rejectRoleCollision(ctx, conn, name); err != nil {
+		return nil, err
+	}
 	rows, err := conn.Query(ctx, "SELECT name, storage, arrayMap(x -> toString(x), auth_type), default_roles_all, default_roles_list, default_roles_except FROM system.users WHERE name = "+access.QuoteString(name))
 	if err != nil {
 		return nil, errors.New("could not read ClickHouse user metadata")
@@ -42,15 +46,15 @@ func (us *CHUserService) GetUser(ctx context.Context, conn access.Connection, na
 	if user.Storage != "local_directory" {
 		return nil, errors.New("only SQL users in local_directory storage can be managed; XML and replicated access users require a separate migration")
 	}
-	grants, err := conn.Query(ctx, "SELECT granted_role_name, with_admin_option FROM system.role_grants WHERE user_name = "+access.QuoteString(name))
+	roleGrants, err := conn.Query(ctx, "SELECT granted_role_name, with_admin_option FROM system.role_grants WHERE user_name = "+access.QuoteString(name))
 	if err != nil {
 		return nil, errors.New("could not read ClickHouse user role assignments")
 	}
-	defer grants.Close()
-	for grants.Next() {
+	defer roleGrants.Close()
+	for roleGrants.Next() {
 		var role string
 		var admin uint8
-		if err := grants.Scan(&role, &admin); err != nil {
+		if err := roleGrants.Scan(&role, &admin); err != nil {
 			return nil, errors.New("could not decode ClickHouse user role assignments")
 		}
 		user.Roles = append(user.Roles, role)
@@ -58,26 +62,30 @@ func (us *CHUserService) GetUser(ctx context.Context, conn access.Connection, na
 			user.AdminRoles = append(user.AdminRoles, role)
 		}
 	}
-	if grants.Err() != nil {
+	if roleGrants.Err() != nil {
 		return nil, errors.New("could not read ClickHouse user role assignments")
 	}
-	if err := rejectDirectGrants(ctx, conn, name); err != nil {
-		return nil, err
+	if err := roleGrants.Close(); err != nil {
+		return nil, errors.New("could not close ClickHouse user role assignments")
+	}
+	user.Grants, err = grants.Read(ctx, conn, "user", name)
+	if err != nil {
+		return nil, fmt.Errorf("could not read supported direct user privileges: %w", err)
 	}
 	return user, nil
 }
 
-func rejectDirectGrants(ctx context.Context, conn access.Connection, name string) error {
-	rows, err := conn.Query(ctx, "SELECT access_type FROM system.grants WHERE user_name = "+access.QuoteString(name)+" LIMIT 1")
+func rejectRoleCollision(ctx context.Context, conn access.Connection, name string) error {
+	rows, err := conn.Query(ctx, "SELECT name FROM system.roles WHERE name = ?", name)
 	if err != nil {
-		return errors.New("could not inspect direct user privileges")
+		return errors.New("could not inspect user/role name ownership")
 	}
 	defer rows.Close()
 	if rows.Next() {
-		return errors.New("user has direct privilege grants; remove or migrate them explicitly before managing role-based access")
+		return errors.New("user shares its name with a role; grant ownership is ambiguous")
 	}
 	if rows.Err() != nil {
-		return errors.New("could not inspect direct user privileges")
+		return errors.New("could not inspect user/role name ownership")
 	}
 	return nil
 }
@@ -150,6 +158,7 @@ func (us *CHUserService) Reconcile(ctx context.Context, plan UserResource) error
 	missing := false
 	extras := map[string]bool{}
 	admins := map[string]bool{}
+	actualGrants := []grants.Grant{}
 	for _, user := range users {
 		if user == nil {
 			missing = true
@@ -163,6 +172,7 @@ func (us *CHUserService) Reconcile(ctx context.Context, plan UserResource) error
 		for _, role := range user.AdminRoles {
 			admins[role] = true
 		}
+		actualGrants = append(actualGrants, user.Grants...)
 	}
 	if missing {
 		if err := us.exec(ctx, userSQL(plan, "CREATE IF NOT EXISTS"), "missing user repair"); err != nil {
@@ -171,6 +181,9 @@ func (us *CHUserService) Reconcile(ctx context.Context, plan UserResource) error
 	}
 	if err := us.exec(ctx, userSQL(plan, "ALTER"), "password update"); err != nil {
 		return err
+	}
+	if err := grants.Reconcile(ctx, us.Connections[0], plan.Name, plan.Cluster, plan.Grants, actualGrants); err != nil {
+		return errors.New("ClickHouse direct user privilege reconciliation failed; resource retained; database diagnostics are suppressed")
 	}
 	target := access.QuoteIdentifier(plan.Name)
 	cluster := access.ClusterClause(plan.Cluster)
