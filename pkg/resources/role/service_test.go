@@ -10,6 +10,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
+	grantpolicy "github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
@@ -21,6 +22,7 @@ type testRows struct {
 }
 
 func (rows *testRows) Next() bool { return rows.index < len(rows.values) }
+
 func (rows *testRows) Scan(values ...interface{}) error {
 	if len(values) != len(rows.values[rows.index]) {
 		return fmt.Errorf("scan arity mismatch")
@@ -31,7 +33,9 @@ func (rows *testRows) Scan(values ...interface{}) error {
 	rows.index++
 	return nil
 }
-func (rows *testRows) Err() error   { return nil }
+
+func (rows *testRows) Err() error { return nil }
+
 func (rows *testRows) Close() error { rows.closed = true; return nil }
 
 type testConnection struct {
@@ -43,6 +47,7 @@ type testConnection struct {
 func (conn *testConnection) Query(_ context.Context, query string, args ...interface{}) (driver.Rows, error) {
 	return conn.query(query, args...)
 }
+
 func (conn *testConnection) Exec(_ context.Context, query string, _ ...interface{}) error {
 	conn.execs = append(conn.execs, query)
 	return nil
@@ -144,10 +149,10 @@ func TestRoleSchemaAndGrantValidation(t *testing.T) {
 	if !resource.Schema["name"].ForceNew || !resource.Schema["cluster"].ForceNew {
 		t.Fatal("role name and scope must be immutable")
 	}
-	if _, errors := validatePrivilege("ALTER", "privilege"); len(errors) == 0 {
+	if _, errors := grantpolicy.ValidatePrivilege("ALTER", "privilege"); len(errors) == 0 {
 		t.Fatal("broad aliases must be rejected")
 	}
-	if normalizePrivilege(" select ") != "SELECT" {
+	if grantpolicy.NormalizePrivilege(" select ") != "SELECT" {
 		t.Fatal("privilege normalization failed")
 	}
 	data := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{
@@ -222,12 +227,12 @@ func TestRoleReadRejectsAmbiguousIdentity(t *testing.T) {
 
 func TestExpandServerPrivilegeGroups(t *testing.T) {
 	hierarchy := map[string][]string{"SHOW": {"SHOW DATABASES", "SHOW TABLES", "SHOW COLUMNS", "SHOW DICTIONARIES"}}
-	leaves, err := expandPrivilege("SHOW", hierarchy, map[string]bool{})
+	leaves, err := grantpolicy.ExpandPrivilege("SHOW", hierarchy, map[string]bool{})
 	if err != nil || len(leaves) != 4 {
 		t.Fatalf("group did not expand: %v %v", leaves, err)
 	}
 	hierarchy["SHOW"] = append(hierarchy["SHOW"], "READ")
-	if _, err := expandPrivilege("SHOW", hierarchy, map[string]bool{}); err == nil {
+	if _, err := grantpolicy.ExpandPrivilege("SHOW", hierarchy, map[string]bool{}); err == nil {
 		t.Fatal("group containing unsupported rights accepted")
 	}
 }

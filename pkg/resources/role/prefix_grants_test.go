@@ -9,6 +9,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
+	grantpolicy "github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
@@ -45,14 +46,14 @@ func TestHasPrefixWildcard(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.statement, func(t *testing.T) {
-			prefix, err := hasPrefixWildcard(test.statement)
+			prefix, err := grantpolicy.HasPrefixWildcard(test.statement)
 			if err != nil || prefix != test.prefix {
 				t.Fatalf("prefix=%v err=%v; want %v", prefix, err, test.prefix)
 			}
 		})
 	}
 	for _, statement := range []string{"GRANT SELECT ON db.`unterminated", "GRANT SELECT ON db.`trailing\\"} {
-		if _, err := hasPrefixWildcard(statement); err == nil {
+		if _, err := grantpolicy.HasPrefixWildcard(statement); err == nil {
 			t.Fatalf("accepted malformed statement %q", statement)
 		}
 	}

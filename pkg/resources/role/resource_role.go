@@ -7,6 +7,7 @@ import (
 
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/access"
 	"github.com/Triple-Whale/terraform-provider-clickhouse/pkg/common"
+	grantpolicy "github.com/Triple-Whale/terraform-provider-clickhouse/pkg/grants"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
@@ -23,7 +24,7 @@ func ResourceRole() *schema.Resource {
 			if !diff.NewValueKnown("grants") {
 				return nil
 			}
-			_, err := decodeGrants(diff.Get("grants").(*schema.Set))
+			_, err := grantpolicy.Decode(diff.Get("grants").(*schema.Set))
 			return err
 		},
 		Timeouts: &schema.ResourceTimeout{
@@ -38,62 +39,13 @@ func ResourceRole() *schema.Resource {
 				Description: "Explicit immutable ON CLUSTER target. Empty means local; provider default_cluster is not inherited."},
 			"replicas_in_sync": {Type: schema.TypeBool, Optional: true, Default: true, ValidateFunc: validateTrue,
 				Description: "Must remain true in configuration. Refresh records false when replicas diverge, scheduling reconciliation."},
-			"grants": {Type: schema.TypeSet, Required: true, ConfigMode: schema.SchemaConfigModeAttr, Description: "Complete set of direct grants. Use an empty set for a role with no privileges.", Elem: &schema.Resource{Schema: map[string]*schema.Schema{
-				"database": {Type: schema.TypeString, Required: true, ValidateFunc: validateScope, Description: "Database name, or * for every database."},
-				"table":    {Type: schema.TypeString, Required: true, ValidateFunc: validateScope, Description: "Explicit table name, or * for every table."},
-				"privileges": {Type: schema.TypeSet, Required: true, MinItems: 1, Description: "Atomic privileges, such as SELECT or INSERT; aliases and groups such as ALL and ALTER are unsupported.",
-					Elem: &schema.Schema{Type: schema.TypeString, StateFunc: normalizePrivilege, ValidateFunc: validatePrivilege}},
-			}}},
+			"grants": grantpolicy.Schema(true),
 		},
 	}
 }
 
-func decodeGrants(set *schema.Set) ([]Grant, error) {
-	grants := []Grant{}
-	seen := map[[2]string]bool{}
-	count := 0
-	for _, value := range set.List() {
-		entry := value.(map[string]interface{})
-		database, table := entry["database"].(string), entry["table"].(string)
-		if err := validateGrantScope(database, table); err != nil {
-			return nil, err
-		}
-		key := [2]string{database, table}
-		if seen[key] {
-			return nil, fmt.Errorf("combine privileges for database %q table %q into one grants entry", database, table)
-		}
-		seen[key] = true
-		grant := Grant{Database: database, Table: table}
-		for _, privilege := range entry["privileges"].(*schema.Set).List() {
-			if _, errors := validatePrivilege(privilege, "privileges"); len(errors) != 0 {
-				return nil, errors[0]
-			}
-			grant.Privileges = append(grant.Privileges, normalizePrivilege(privilege))
-			count++
-		}
-		grants = append(grants, grant)
-	}
-	canonical := permissions(grants)
-	if len(canonical) != count {
-		return nil, fmt.Errorf("grants contain redundant overlapping scopes for the same privilege")
-	}
-	return grantsFromPermissions(canonical), nil
-}
-
-func validateGrantScope(database, table string) error {
-	for key, value := range map[string]string{"database": database, "table": table} {
-		if _, errors := validateScope(value, key); len(errors) != 0 {
-			return errors[0]
-		}
-	}
-	if database == "*" && table != "*" {
-		return fmt.Errorf("a wildcard database requires a wildcard table")
-	}
-	return nil
-}
-
 func desiredRole(data *schema.ResourceData) (RoleResource, error) {
-	grants, err := decodeGrants(data.Get("grants").(*schema.Set))
+	grants, err := grantpolicy.Decode(data.Get("grants").(*schema.Set))
 	return RoleResource{Name: data.Get("name").(string), Cluster: data.Get("cluster").(string), Grants: grants}, err
 }
 
@@ -129,7 +81,7 @@ func resourceRoleRead(ctx context.Context, data *schema.ResourceData, meta inter
 		data.SetId("")
 		return nil
 	}
-	if err := data.Set("grants", stateGrants(role.Grants)); err != nil {
+	if err := data.Set("grants", grantpolicy.State(role.Grants)); err != nil {
 		return diag.FromErr(err)
 	}
 	if err := data.Set("replicas_in_sync", rolesMatch(roles, role.Grants)); err != nil {
@@ -200,7 +152,7 @@ func reconcileRole(ctx context.Context, data *schema.ResourceData, connections [
 	}); err != nil {
 		return diag.FromErr(err)
 	}
-	if err := data.Set("grants", stateGrants(role.Grants)); err != nil {
+	if err := data.Set("grants", grantpolicy.State(role.Grants)); err != nil {
 		return diag.FromErr(err)
 	}
 	if err := data.Set("replicas_in_sync", true); err != nil {
@@ -232,12 +184,4 @@ func resourceRoleDelete(ctx context.Context, data *schema.ResourceData, meta int
 	}
 	data.SetId("")
 	return nil
-}
-
-func stateGrants(grants []Grant) []interface{} {
-	values := make([]interface{}, 0, len(grants))
-	for _, grant := range grants {
-		values = append(values, map[string]interface{}{"database": grant.Database, "table": grant.Table, "privileges": grant.Privileges})
-	}
-	return values
 }
